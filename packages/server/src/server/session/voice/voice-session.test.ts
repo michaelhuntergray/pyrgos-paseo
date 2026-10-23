@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import pino from "pino";
 import { describe, expect, test, vi } from "vitest";
 
-import { VoiceSession, type VoiceSessionHost } from "./voice-session.js";
+import { VoiceSession, type VoiceSessionHost, type VoiceSessionOptions } from "./voice-session.js";
 import type { ManagedAgent } from "../../agent/agent-manager.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type {
@@ -82,7 +82,10 @@ function createFakeHost(): FakeVoiceHost {
   };
 }
 
-function createVoiceSession(tts: TextToSpeechProvider | null = null) {
+function createVoiceSession(
+  tts: TextToSpeechProvider | null = null,
+  conversation?: VoiceSessionOptions["conversation"],
+) {
   let speakHandler: VoiceSpeakHandler | undefined;
   const detector = new FakeVoiceTurnDetectionSession();
   const sttSession = new FakeVoiceSttSession();
@@ -100,6 +103,7 @@ function createVoiceSession(tts: TextToSpeechProvider | null = null) {
     logger: pino({ level: "silent" }),
     sessionId: "voice-session-test",
     sttLanguage: "en",
+    conversation,
     tts,
     voiceBridge: {
       registerVoiceSpeakHandler: (_id, handler) => {
@@ -324,5 +328,62 @@ describe("VoiceSession streaming transcription", () => {
     );
 
     await voiceSession.cleanup();
+  });
+});
+
+describe("VoiceSession conversation", () => {
+  test("sends the final transcript to the conversation, plays its speech and barges in", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    const heard: string[] = [];
+    const bargeIn = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const { voiceSession, detector, sttSession, host } = createVoiceSession(
+      tts,
+      async (onEvent) => ({
+        handleTranscript: async (text) => {
+          heard.push(text);
+          onEvent({ type: "speak", text: "Drafted it.", kind: "reply" });
+        },
+        bargeIn,
+        close,
+      }),
+    );
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "add a readme line",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput).length).toBeGreaterThan(0));
+    expect(heard).toEqual(["add a readme line"]);
+    expect(host.spokenInput).toEqual([]);
+    await vi.waitFor(() =>
+      expect(host.emitted).toContainEqual(
+        expect.objectContaining({
+          type: "activity_log",
+          payload: expect.objectContaining({ type: "assistant", content: "Drafted it." }),
+        }),
+      ),
+    );
+
+    detector.emit("speech_started");
+    await settle();
+    expect(bargeIn).toHaveBeenCalled();
+
+    await voiceSession.cleanup();
+    expect(close).toHaveBeenCalled();
   });
 });

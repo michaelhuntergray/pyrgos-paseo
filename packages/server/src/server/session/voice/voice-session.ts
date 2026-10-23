@@ -131,7 +131,24 @@ export interface VoiceSessionHost {
   hasActiveAgentRun(agentId: string | null): boolean;
 }
 
+/** A spoken-conversation brain that replaces the voice agent's own turn (Pyrgos conversation agent). */
+export interface VoiceConversation {
+  handleTranscript(text: string): Promise<void>;
+  bargeIn(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export type VoiceConversationEvent =
+  | { type: "speak"; text: string; kind: "filler" | "reply" }
+  | { type: "error"; message: string }
+  | { type: "other" };
+
 export interface VoiceSessionOptions {
+  /**
+   * When set, final transcripts go to this conversation instead of `host.sendSpokenInput`.
+   * Created lazily on the first transcript; its `speak` events are played through TTS in order.
+   */
+  conversation?: (onEvent: (event: VoiceConversationEvent) => void) => Promise<VoiceConversation>;
   host: VoiceSessionHost;
   logger: pino.Logger;
   sessionId: string;
@@ -210,7 +227,12 @@ export class VoiceSession {
   private voiceModeAgentId: string | null = null;
   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
 
+  private readonly conversationFactory: VoiceSessionOptions["conversation"];
+  private conversation: Promise<VoiceConversation> | null = null;
+  private speechQueue: Promise<void> = Promise.resolve();
+
   constructor(options: VoiceSessionOptions) {
+    this.conversationFactory = options.conversation;
     const { host, logger, sessionId, sttLanguage, tts, stt, voice, voiceBridge, dictation } =
       options;
     this.host = host;
@@ -1036,6 +1058,12 @@ export class VoiceSession {
       return;
     }
 
+    if (this.conversationFactory) {
+      await this.flushPendingAudioSegments("transcription complete");
+      this.runConversationTurn(transcriptText);
+      return;
+    }
+
     const agentId = this.voiceModeAgentId;
     if (!agentId) {
       this.sessionLogger.warn(
@@ -1048,6 +1076,52 @@ export class VoiceSession {
 
     await this.host.sendSpokenInput(agentId, result.text);
     await this.flushPendingAudioSegments("transcription complete");
+  }
+
+  private getConversation(): Promise<VoiceConversation> | null {
+    const factory = this.conversationFactory;
+    if (!factory) return null;
+    this.conversation ??= factory((event) => this.handleConversationEvent(event));
+    return this.conversation;
+  }
+
+  /** Fire and forget: the turn runs to its end while the next utterance may barge in. */
+  private runConversationTurn(text: string): void {
+    const conversation = this.getConversation();
+    if (!conversation) return;
+    void conversation
+      .then((c) => c.handleTranscript(text))
+      .catch((error) => {
+        this.sessionLogger.error({ err: error }, "Voice conversation turn failed");
+      });
+  }
+
+  private handleConversationEvent(event: VoiceConversationEvent): void {
+    if (this.closed) return;
+    if (event.type === "error") {
+      this.sessionLogger.warn({ message: event.message }, "Voice conversation error");
+      return;
+    }
+    if (event.type !== "speak") return;
+    const signal = this.abortController.signal;
+    const text = event.text;
+    this.speechQueue = this.speechQueue
+      .then(async () => {
+        if (this.closed || signal.aborted) return;
+        this.emit({
+          type: "activity_log",
+          payload: { id: uuidv4(), timestamp: new Date(), type: "assistant", content: text },
+        });
+        await this.ttsManager.generateAndWaitForPlayback(
+          text,
+          (msg) => this.emit(msg),
+          signal,
+          true,
+        );
+      })
+      .catch((error) => {
+        this.sessionLogger.warn({ err: error }, "Voice conversation playback failed");
+      });
   }
 
   private registerVoiceBridgeForAgent(agentId: string): void {
@@ -1179,6 +1253,7 @@ export class VoiceSession {
     this.clearBufferTimeout();
 
     this.abortController.abort();
+    void this.conversation?.then((c) => c.bargeIn()).catch(() => undefined);
     await this.handleAbort();
 
     const latencyMs = Date.now() - chunkReceivedAt;
@@ -1345,6 +1420,7 @@ export class VoiceSession {
     } finally {
       try {
         await this.stopVoiceTurnController();
+        await this.conversation?.then((c) => c.close()).catch(() => undefined);
       } finally {
         await this.disableVoiceModeForActiveAgent(true);
         this.isVoiceMode = false;
