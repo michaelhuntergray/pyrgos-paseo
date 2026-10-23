@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 import { voiceFeedDir } from "./ledger/jsonl-store.js";
 import type { LedgerItem } from "./ledger/ledger.js";
 
@@ -18,14 +18,27 @@ export interface DispatchLauncherOptions {
 const defaultSpawn: SpawnFn = (file, args, logFd) =>
   spawn(file, args, { detached: true, stdio: ["ignore", logFd, logFd] });
 
-/** Folder of `project` under `<workshop>/<group>/`, or null. The name must be a single path segment. */
+/**
+ * Folder of `project` under `<workshop>/<group>/`, or null. The name must be a single path
+ * segment, a real directory (not a symlink) inside the workshop, and match in exactly one group.
+ */
 export function resolveProjectDir(workshop: string, project: string): string | null {
   if (!/^[A-Za-z0-9._-]+$/.test(project) || project.startsWith(".")) return null;
+  const matches: string[] = [];
   for (const group of safeDirs(workshop)) {
     const candidate = join(workshop, group, project);
-    if (existsSync(candidate)) return candidate;
+    if (isRealDirInside(workshop, candidate)) matches.push(candidate);
   }
-  return null;
+  return matches.length === 1 ? (matches[0] ?? null) : null;
+}
+
+function isRealDirInside(root: string, candidate: string): boolean {
+  try {
+    if (!lstatSync(candidate).isDirectory()) return false;
+    return realpathSync(candidate).startsWith(realpathSync(root) + sep);
+  } catch {
+    return false;
+  }
 }
 
 function safeDirs(dir: string): string[] {

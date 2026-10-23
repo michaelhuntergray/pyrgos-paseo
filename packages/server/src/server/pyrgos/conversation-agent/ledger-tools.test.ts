@@ -70,3 +70,15 @@ describe("ledger tools", () => {
     expect(await t.run("refine_action", { id: "missing", scope: "s" })).toContain("Not done");
   });
 });
+
+describe("isAffirmative: reviewer inputs", () => {
+  it.each(["I never said yes", "I didn't say yes", "she said yes to something else"])(
+    "rejects %s",
+    (t) => {
+      expect(isAffirmative(t)).toBe(false);
+    },
+  );
+  it.each(["okay, yes", "Well yes please"])("accepts %s", (t) => {
+    expect(isAffirmative(t)).toBe(true);
+  });
+});

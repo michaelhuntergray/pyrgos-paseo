@@ -153,3 +153,62 @@ describe("conversation: spoken request to launched item", () => {
     await conv.close();
   });
 });
+
+import { LEDGER_PROMPT } from "./conversation.js";
+
+describe("conversation: reviewer inputs", () => {
+  it("LEDGER_PROMPT carries no personal name", () => {
+    expect(LEDGER_PROMPT).not.toMatch(/michael/i);
+  });
+
+  it("a turn cannot agree an item on the next turn's yes", async () => {
+    const launch = vi.fn(async () => {});
+    const root = mkdtempSync(join(tmpdir(), "conv-"));
+    mkdirSync(join(root, ".agents/feedback/voice"), { recursive: true });
+    let toolMap = new Map<string, ToolDef>();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let agreeResult = "";
+    let turnNo = 0;
+    const conversation = await createPyrgosConversation({
+      env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
+      onEvent: () => {},
+      launch,
+      announce: async () => {},
+      brainFactory: ({ tools }) => {
+        toolMap = new Map(tools.map((t) => [t.name, t]));
+        return {
+          async *runTurn(): AsyncGenerator<BrainEvent> {
+            const n = ++turnNo;
+            if (n === 1) {
+              const out = await toolMap.get("propose_action")!.run({ item: "x" });
+              const id = /id ([0-9a-f-]{8,})/.exec(out)![1]!;
+              await toolMap
+                .get("refine_action")!
+                .run({ id, scope: "s", project: "p", doneCriteria: "d" });
+              (globalThis as { __id?: string }).__id = id;
+            } else if (n === 2) {
+              await gate;
+              agreeResult = await toolMap
+                .get("agree_action")!
+                .run({ id: (globalThis as { __id?: string }).__id });
+            }
+            yield { type: "text", text: "ok." };
+          },
+          async interrupt() {
+            release();
+          },
+          async close() {},
+        };
+      },
+    });
+    await conversation.handleTranscript("make a thing"); // turn 1: draft + refine
+    // Turn 2 hangs on the gate; "yes" arrives while it runs.
+    const pending = conversation.handleTranscript("what is the status");
+    await new Promise((r) => setTimeout(r, 20));
+    await conversation.handleTranscript("yes");
+    await pending;
+    expect(agreeResult).toMatch(/^Not done/);
+    expect(launch).not.toHaveBeenCalled();
+  });
+});

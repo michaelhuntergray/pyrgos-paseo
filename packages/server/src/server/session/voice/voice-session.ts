@@ -131,6 +131,8 @@ export interface VoiceSessionHost {
   hasActiveAgentRun(agentId: string | null): boolean;
 }
 
+const CONVERSATION_CLOSE_TIMEOUT_MS = 3000;
+
 /** A spoken-conversation brain that replaces the voice agent's own turn (Pyrgos conversation agent). */
 export interface VoiceConversation {
   handleTranscript(text: string): Promise<void>;
@@ -1078,6 +1080,21 @@ export class VoiceSession {
     await this.flushPendingAudioSegments("transcription complete");
   }
 
+  /** Close the conversation, but never wait longer than CONVERSATION_CLOSE_TIMEOUT_MS for it. */
+  private async closeConversation(): Promise<void> {
+    const pending = this.conversation;
+    if (!pending) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CONVERSATION_CLOSE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([pending.then((c) => c.close()).catch(() => undefined), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private getConversation(): Promise<VoiceConversation> | null {
     const factory = this.conversationFactory;
     if (!factory) return null;
@@ -1420,7 +1437,7 @@ export class VoiceSession {
     } finally {
       try {
         await this.stopVoiceTurnController();
-        await this.conversation?.then((c) => c.close()).catch(() => undefined);
+        await this.closeConversation();
       } finally {
         await this.disableVoiceModeForActiveAgent(true);
         this.isVoiceMode = false;

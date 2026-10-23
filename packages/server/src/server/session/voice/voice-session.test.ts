@@ -386,4 +386,39 @@ describe("VoiceSession conversation", () => {
     await voiceSession.cleanup();
     expect(close).toHaveBeenCalled();
   });
+
+  test("cleanup does not hang when the conversation factory never resolves", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const tts: TextToSpeechProvider = {
+        async synthesizeSpeech() {
+          return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+        },
+      };
+      const { voiceSession, detector, sttSession } = createVoiceSession(
+        tts,
+        () => new Promise(() => {}),
+      );
+      await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+      detector.emit("speech_started");
+      await settle();
+      detector.emit("speech_stopped");
+      await settle();
+      sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+      sttSession.emitTranscript({
+        segmentId: "s1",
+        transcript: "hello",
+        isFinal: true,
+        language: "en",
+        avgLogprob: -0.1,
+        isLowConfidence: false,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const done = voiceSession.cleanup();
+      await vi.advanceTimersByTimeAsync(5000);
+      await done;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

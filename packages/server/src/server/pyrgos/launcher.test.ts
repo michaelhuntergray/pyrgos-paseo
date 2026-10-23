@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -99,5 +99,27 @@ describe("dispatch launcher", () => {
     for (const bad of ["../demo", "a/b", ".hidden", "", "demo;rm"]) {
       expect(resolveProjectDir(root, bad)).toBeNull();
     }
+  });
+});
+
+describe("resolveProjectDir: reviewer inputs", () => {
+  it("rejects a symlink named demo that points outside the workshop", () => {
+    const root = mkdtempSync(join(tmpdir(), "launch-"));
+    const outside = mkdtempSync(join(tmpdir(), "outside-"));
+    mkdirSync(join(root, "Professional"), { recursive: true });
+    symlinkSync(outside, join(root, "Professional", "demo"));
+    expect(resolveProjectDir(root, "demo")).toBeNull();
+  });
+  it("rejects a file named demo", () => {
+    const root = mkdtempSync(join(tmpdir(), "launch-"));
+    mkdirSync(join(root, "Professional"), { recursive: true });
+    writeFileSync(join(root, "Professional", "demo"), "x");
+    expect(resolveProjectDir(root, "demo")).toBeNull();
+  });
+  it("returns null when two groups contain demo", () => {
+    const root = mkdtempSync(join(tmpdir(), "launch-"));
+    mkdirSync(join(root, "Professional", "demo"), { recursive: true });
+    mkdirSync(join(root, "Personal", "demo"), { recursive: true });
+    expect(resolveProjectDir(root, "demo")).toBeNull();
   });
 });

@@ -19,11 +19,11 @@ import { createDispatchLauncher } from "./launcher.js";
 
 /** Appended to the voice prompt: how a spoken request becomes an action item. */
 export const LEDGER_PROMPT =
-  " When Michael asks for work to be done, keep an action item: call propose_action, then ask for " +
+  " When the user asks for work to be done, keep an action item: call propose_action, then ask for " +
   "whatever is missing (scope, which project folder, and how we will know it is done) and call " +
   "refine_action as he answers. When all three are filled, read the whole item back in one or two " +
-  "sentences and ask whether to go ahead. Only after he says yes in his next message, call " +
-  "agree_action; the system refuses it otherwise. If he changes his mind, call drop_action. Never " +
+  "sentences and ask whether to go ahead. Only after they say yes in their next message, call " +
+  "agree_action; the system refuses it otherwise. If they change their mind, call drop_action. Never " +
   "say work has started unless agree_action succeeded.";
 
 export interface PyrgosConversationOptions {
@@ -62,6 +62,7 @@ export async function createPyrgosConversation(
   });
 
   let turn = 0;
+  let latestTicket = 0;
   let latestText = "";
   let latestRef: string | null = null;
   const model = parseModelFlag(env.PYRGOS_CONVERSATION_MODEL);
@@ -109,6 +110,11 @@ export async function createPyrgosConversation(
     async handleTranscript(text) {
       const trimmed = text.trim();
       if (!trimmed) return;
+      // Stop the running turn before this transcript becomes the consent text, so the old turn
+      // cannot agree an item on the new turn's yes. Only the newest transcript goes on.
+      const ticket = ++latestTicket;
+      await agent.bargeIn();
+      if (ticket !== latestTicket) return;
       turn += 1;
       latestText = trimmed;
       try {
@@ -117,6 +123,7 @@ export async function createPyrgosConversation(
       } catch {
         latestRef = null;
       }
+      if (ticket !== latestTicket) return;
       await agent.handleTranscript(trimmed);
     },
     bargeIn: () => agent.bargeIn(),
