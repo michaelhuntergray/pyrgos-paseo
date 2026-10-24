@@ -14,7 +14,8 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $app = Join-Path $root 'packages/app'
 $out = if ($env:PYRGOS_APK_OUT) { $env:PYRGOS_APK_OUT } else { Join-Path $root 'artifacts/pyrgos' }
 
-$javaOk = $env:JAVA_HOME -and (Test-Path "$env:JAVA_HOME/bin/java*") -and ((& "$env:JAVA_HOME/bin/java" -version 2>&1 | Out-String) -match 'version "(17|18|19|20|21)\.')
+# java -version writes to stderr; under Windows PowerShell 5.1 with Stop that is a terminating NativeCommandError
+$javaOk = $env:JAVA_HOME -and (Test-Path "$env:JAVA_HOME/bin/java*") -and ((& { $ErrorActionPreference = 'Continue'; & "$env:JAVA_HOME/bin/java" -version 2>&1 | Out-String }) -match 'version "(17|18|19|20|21)\.')
 if (-not $javaOk) { throw 'Set JAVA_HOME to a JDK 17-21 (see docs/pyrgos/BUILD.md).' }
 if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk' }
 $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
@@ -37,8 +38,12 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $out = (Resolve-Path $out).Path
 Push-Location $root
 # npm blocks these native-asset postinstalls (allowScripts); run them explicitly.
+# Windows: Git's GNU tar reads "C:\..." as a remote host; System32's bsdtar must come first for these extracts.
+$prevPath = $env:PATH
+if ($env:OS -eq 'Windows_NT') { $env:PATH = "$env:SystemRoot\System32$sep$env:PATH" }
 Push-Location (Join-Path $app 'node_modules/react-native-enriched-markdown'); Run 'node' @('postinstall.mjs'); Pop-Location
 Push-Location (Join-Path $app 'node_modules/@shopify/react-native-skia'); Run 'node' @('scripts/install-libs.js'); Pop-Location
+$env:PATH = $prevPath
 Run 'npm' @('run', 'build:app-deps')
 Set-Location $app
 $env:APP_VARIANT = 'production'
