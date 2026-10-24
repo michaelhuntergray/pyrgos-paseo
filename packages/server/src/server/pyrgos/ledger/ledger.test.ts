@@ -183,6 +183,37 @@ describe("ledger state machine", () => {
     expect(launch).toHaveBeenCalledTimes(1);
   });
 
+  it("does not re-announce when announce succeeded but its record failed to persist", async () => {
+    const rows: LedgerItem[] = [];
+    let failNext = false;
+    const store: LedgerStore = {
+      append: (item) => {
+        if (failNext && item.announcedAt !== null) {
+          failNext = false;
+          throw new Error("disk full");
+        }
+        rows.push(item);
+      },
+      load: () => rows,
+    };
+    const announce = vi.fn(async () => {});
+    const launch = vi.fn(async () => {});
+    const ledger = createLedger({ store, announce, launch, newId: () => "u2" });
+    const { id } = ledger.propose({ item: "x" });
+    ledger.refine(id, COMPLETE);
+    failNext = true;
+    const first = await ledger.agree(id, { confirmed: true });
+    expect(first.announcedAt).toBeNull();
+    expect(first.launchError).toMatch(/not recorded: disk full/);
+    expect(announce).toHaveBeenCalledTimes(1);
+    const second = await ledger.agree(id, { confirmed: true });
+    expect(second.announcedAt).not.toBeNull();
+    expect(second.launchedAt).not.toBeNull();
+    expect(second.launchError).toBeNull();
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
   it("retries a failed launch without re-announcing", async () => {
     const announce = vi.fn(async () => {});
     const launch = vi
