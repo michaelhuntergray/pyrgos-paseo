@@ -1108,7 +1108,11 @@ export class VoiceSession {
     const conversation = this.getConversation();
     if (!conversation) return;
     void conversation
-      .then((c) => c.handleTranscript(text))
+      .then((c) => {
+        // The factory can resolve after cleanup; a late transcript must not reach the ledger.
+        if (this.closed) return undefined;
+        return c.handleTranscript(text);
+      })
       .catch((error) => {
         this.sessionLogger.error({ err: error }, "Voice conversation turn failed");
       });
@@ -1117,7 +1121,7 @@ export class VoiceSession {
   private handleConversationEvent(event: VoiceConversationEvent): void {
     if (this.closed) return;
     if (event.type === "error") {
-      this.sessionLogger.warn({ message: event.message }, "Voice conversation error");
+      this.sessionLogger.warn({ message: redact(event.message) }, "Voice conversation error");
       return;
     }
     if (event.type !== "speak") return;

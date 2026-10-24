@@ -94,3 +94,14 @@ describe("isAffirmative: reviewer inputs", () => {
     expect(isAffirmative(t)).toBe(true);
   });
 });
+
+describe("agree_action needs a plain yes", () => {
+  it.each(["do it", "go ahead", "make it so"])("refuses %s on a refined item", async (said) => {
+    const t = setup();
+    const id = /id (\S+)/.exec(await t.run("propose_action", { item: "ship it" }))![1]!;
+    await t.run("refine_action", { id, scope: "s", project: "p", doneCriteria: "d" });
+    t.say(said);
+    expect(await t.run("agree_action", { id })).toContain("has not said yes");
+    expect(t.launch).not.toHaveBeenCalled();
+  });
+});

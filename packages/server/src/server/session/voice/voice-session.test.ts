@@ -4,7 +4,12 @@ import { EventEmitter } from "node:events";
 import pino from "pino";
 import { describe, expect, test, vi } from "vitest";
 
-import { VoiceSession, type VoiceSessionHost, type VoiceSessionOptions } from "./voice-session.js";
+import {
+  VoiceSession,
+  type VoiceConversation,
+  type VoiceSessionHost,
+  type VoiceSessionOptions,
+} from "./voice-session.js";
 import type { ManagedAgent } from "../../agent/agent-manager.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type {
@@ -85,6 +90,7 @@ function createFakeHost(): FakeVoiceHost {
 function createVoiceSession(
   tts: TextToSpeechProvider | null = null,
   conversation?: VoiceSessionOptions["conversation"],
+  logger: pino.Logger = pino({ level: "silent" }),
 ) {
   let speakHandler: VoiceSpeakHandler | undefined;
   const detector = new FakeVoiceTurnDetectionSession();
@@ -100,7 +106,7 @@ function createVoiceSession(
   const host = createFakeHost();
   const voiceSession = new VoiceSession({
     host,
-    logger: pino({ level: "silent" }),
+    logger,
     sessionId: "voice-session-test",
     sttLanguage: "en",
     conversation,
@@ -466,5 +472,79 @@ describe("VoiceSession conversation", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("VoiceSession conversation: reviewer inputs", () => {
+  const finalTranscript = async (
+    parts: ReturnType<typeof createVoiceSession>,
+    transcript: string,
+  ) => {
+    const { voiceSession, detector, sttSession } = parts;
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript,
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+  };
+
+  test("a conversation that resolves after cleanup never receives the transcript", async () => {
+    let resolveFactory!: (c: VoiceConversation) => void;
+    const heard: string[] = [];
+    const close = vi.fn(async () => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const parts = createVoiceSession(
+        null,
+        () => new Promise<VoiceConversation>((r) => (resolveFactory = r)),
+      );
+      await finalTranscript(parts, "yes");
+      await vi.advanceTimersByTimeAsync(0);
+      const done = parts.voiceSession.cleanup();
+      await vi.advanceTimersByTimeAsync(5000);
+      await done;
+      resolveFactory({
+        handleTranscript: async (text) => void heard.push(text),
+        bargeIn: async () => {},
+        close,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await settle();
+      expect(heard).toEqual([]);
+      expect(close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("conversation error messages are redacted before they reach the log", async () => {
+    const lines: string[] = [];
+    const logger = pino({ level: "warn" }, {
+      write: (line: string) => void lines.push(line),
+    } as unknown as NodeJS.WritableStream);
+    const parts = createVoiceSession(
+      null,
+      async (onEvent) => ({
+        handleTranscript: async () => {
+          onEvent({ type: "error", message: "boom API_KEY=hunter2secret" });
+        },
+        bargeIn: async () => {},
+        close: async () => {},
+      }),
+      logger,
+    );
+    await finalTranscript(parts, "hello");
+    await vi.waitFor(() => expect(lines.join("")).toContain("Voice conversation error"));
+    expect(lines.join("")).not.toContain("hunter2secret");
+    await parts.voiceSession.cleanup();
   });
 });
