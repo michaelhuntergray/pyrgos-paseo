@@ -170,6 +170,7 @@ import {
   setProjectCustomIcon,
 } from "../utils/project-custom-icon.js";
 import { VoiceSessions } from "./session/voice/index.js";
+import { createVoiceConversationFactory } from "./pyrgos/voice-conversation.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
   createWorkspaceGitObserverService,
@@ -1269,6 +1270,7 @@ export class Session {
         voice,
         voiceBridge,
         dictation,
+        conversation: createVoiceConversationFactory(),
       },
       this.delivery,
       () => this.refreshObservationProducers(),

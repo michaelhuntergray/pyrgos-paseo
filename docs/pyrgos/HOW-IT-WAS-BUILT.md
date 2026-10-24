@@ -154,3 +154,12 @@ Decision log for the voice conversation agent in this fork. Ordered by build seq
 
 - Is the stock bound-agent path fast enough to drop core change 2? B measures time-to-first-audio.
 - Does the ledger plugin need a core change to see the ledger, or is reading the shared JSONL enough?
+
+## Wiring the conversation into the voice session (MIC-753)
+
+- **Decided:** `VoiceSession` takes an optional `conversation` factory; a final transcript goes to it instead of `host.sendSpokenInput`, and its `speak` events play through the existing TTS manager in order. Speech start calls `bargeIn`; cleanup closes it. **Who:** overseer set the ticket; Claude implemented.
+- **Chosen:** on by default, `PYRGOS_VOICE_CONVERSATION=0` turns it off. **Rejected:** keeping it opt-in, because the ticket asks for the live voice turn to reach the ledger.
+- **Chosen:** the brain gets `propose_action`, `refine_action`, `drop_action` and `list_actions`, and an `agree_action` that code refuses unless the latest transcript is a plain yes and the item was last changed in an earlier turn. **Rejected:** letting the prompt alone gate agreement, because the model could confirm for the user.
+- **Chosen:** the dispatch launcher runs `$PYRGOS_DISPATCH_CMD worker <spec> --cwd <project folder>` with a fixed argv (no shell), and treats a start error or a non-zero exit within two seconds as a launch failure recorded on the item.
+- **Consequence:** voice mode still needs an agent selected in the app, but spoken turns no longer go to it.
+- **Status:** verified: unit tests for the tools, launcher, conversation and voice session; a live haiku run reached `agreed` with the dispatcher dry run. **Assumed:** a spoken turn from a real microphone through the app, and a real (non-dry-run) launch.
