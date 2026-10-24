@@ -4,9 +4,20 @@ import { WebSocket } from "ws";
 import type { SpeechStreamResult, TextToSpeechProvider } from "../../speech-provider.js";
 import { LAB_IDLE_TIMEOUT_MS, LAB_TTS_SAMPLE_RATE } from "./config.js";
 
+/** Per-request TTS controls. Omitted fields fall back to the configured defaults. */
+export interface LabSynthesisOptions {
+  speed?: number;
+  pitch?: number;
+  emotion?: string;
+}
+
 export interface LabTtsOptions {
   url: string;
   voice: string;
+  /** Default controls sent with each speak; per-request values override them. */
+  speed?: number;
+  pitch?: number;
+  emotion?: string;
   connectTimeoutMs: number;
   /** Max silence between frames (and before the first one); default LAB_IDLE_TIMEOUT_MS. */
   idleTimeoutMs?: number;
@@ -26,15 +37,22 @@ export class LabTTS implements TextToSpeechProvider {
     private readonly options: LabTtsOptions,
     parentLogger: pino.Logger,
   ) {
-    this.logger = parentLogger.child({ module: "speech", provider: "lab", component: "tts" });
+    this.logger = parentLogger.child({
+      module: "speech",
+      provider: "lab",
+      component: "tts",
+    });
   }
 
-  async synthesizeSpeech(text: string): Promise<SpeechStreamResult> {
+  async synthesizeSpeech(
+    text: string,
+    overrides?: LabSynthesisOptions,
+  ): Promise<SpeechStreamResult> {
     if (!text || text.trim().length === 0) {
       throw new Error("Cannot synthesize empty text");
     }
     try {
-      return await this.synthesizeFromLab(text);
+      return await this.synthesizeFromLab(text, overrides);
     } catch (error) {
       if (!this.options.fallback) {
         throw new Error(
@@ -43,11 +61,18 @@ export class LabTTS implements TextToSpeechProvider {
         );
       }
       this.logger.warn({ err: error }, "Lab TTS unavailable; using fallback provider");
-      return this.options.fallback.synthesizeSpeech(text);
+      // Stock providers take only text and ignore the extra argument; a PC LabTTS honours it.
+      const next = this.options.fallback as TextToSpeechProvider & {
+        synthesizeSpeech(text: string, options?: LabSynthesisOptions): Promise<SpeechStreamResult>;
+      };
+      return next.synthesizeSpeech(text, overrides);
     }
   }
 
-  private synthesizeFromLab(text: string): Promise<SpeechStreamResult> {
+  private synthesizeFromLab(
+    text: string,
+    overrides?: LabSynthesisOptions,
+  ): Promise<SpeechStreamResult> {
     return new Promise((resolve, reject) => {
       const stream = new PassThrough();
       const ws = new WebSocket(this.options.url, {
@@ -81,7 +106,19 @@ export class LabTTS implements TextToSpeechProvider {
       };
 
       ws.on("open", () => {
-        ws.send(JSON.stringify({ type: "speak", text, voice: this.options.voice }));
+        const speed = overrides?.speed ?? this.options.speed;
+        const pitch = overrides?.pitch ?? this.options.pitch;
+        const emotion = overrides?.emotion ?? this.options.emotion;
+        ws.send(
+          JSON.stringify({
+            type: "speak",
+            text,
+            voice: this.options.voice,
+            ...(speed !== undefined ? { speed } : {}),
+            ...(pitch !== undefined ? { pitch } : {}),
+            ...(emotion !== undefined ? { emotion } : {}),
+          }),
+        );
         armIdle();
       });
       ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {

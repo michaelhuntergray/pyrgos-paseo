@@ -9,28 +9,39 @@
  */
 import pino from "pino";
 import { resolveLabSpeechConfig } from "../../packages/server/src/server/speech/providers/lab/config.js";
-import {
-  LabSTT,
-  resamplePcm16,
-} from "../../packages/server/src/server/speech/providers/lab/stt.js";
-import { LabTTS } from "../../packages/server/src/server/speech/providers/lab/tts.js";
+import { applyLabSpeechServices } from "../../packages/server/src/server/speech/providers/lab/runtime.js";
+import { resamplePcm16 } from "../../packages/server/src/server/speech/providers/lab/stt.js";
 
 const sentence = process.argv[2] ?? "The quick brown fox jumps over the lazy dog.";
 const config = resolveLabSpeechConfig();
-if (!config.ttsUrl || !config.sttUrl) {
-  console.error("Set PASEO_LAB_TTS_URL and PASEO_LAB_STT_URL.");
+if (!(config.ttsUrl || config.pcTtsUrl) || !(config.sttUrl || config.pcSttUrl)) {
+  console.error("Set PASEO_LAB_TTS_URL / PASEO_LAB_STT_URL (or the PASEO_PC_* twins).");
   process.exit(2);
 }
 const logger = pino({ level: "silent" });
 
-const tts = new LabTTS(
-  {
-    url: config.ttsUrl,
-    voice: config.ttsVoice,
-    connectTimeoutMs: config.connectTimeoutMs,
-    fallback: null,
+// Same chain the daemon builds: lab -> PC local (no stock provider in this script).
+const enabled = { provider: "local", explicit: false, enabled: true } as const;
+const services = applyLabSpeechServices({
+  providers: {
+    dictationStt: enabled,
+    voiceTurnDetection: enabled,
+    voiceStt: enabled,
+    voiceTts: enabled,
+  },
+  existing: {
+    turnDetectionService: null,
+    sttService: null,
+    ttsService: null,
+    dictationSttService: null,
   },
   logger,
+  config,
+});
+const tts = services.ttsService!;
+const stt = services.sttService!;
+console.log(
+  `chain: tts lab=${Boolean(config.ttsUrl)} pc=${Boolean(config.pcTtsUrl)}, stt lab=${Boolean(config.sttUrl)} pc=${Boolean(config.pcSttUrl)}`,
 );
 const started = Date.now();
 const { stream, format } = await tts.synthesizeSpeech(sentence);
@@ -44,10 +55,6 @@ const audio = Buffer.concat(chunks);
 const sourceRate = Number(/rate=(\d+)/.exec(format)?.[1] ?? 24000);
 console.log(`tts: ${audio.length} bytes (${format}), first audio ${firstAudioMs} ms`);
 
-const stt = new LabSTT(
-  { url: config.sttUrl, connectTimeoutMs: config.connectTimeoutMs, fallback: null },
-  logger,
-);
 const session = stt.createSession({ logger, language: "en" });
 const transcript = new Promise<string>((resolve, reject) => {
   session.on("transcript", (event) => {

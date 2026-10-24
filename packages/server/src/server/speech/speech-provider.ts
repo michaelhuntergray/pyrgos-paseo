@@ -21,6 +21,14 @@ export interface StreamingTranscriptionCommittedEvent {
   previousSegmentId: string | null;
 }
 
+/** Word-level timing, in seconds from the start of the utterance. */
+export interface WordTimestamp {
+  word: string;
+  start: number;
+  end: number;
+  probability?: number;
+}
+
 export interface StreamingTranscriptionEvent {
   segmentId: string;
   transcript: string;
@@ -29,6 +37,8 @@ export interface StreamingTranscriptionEvent {
   logprobs?: LogprobToken[];
   avgLogprob?: number;
   isLowConfidence?: boolean;
+  /** Present only when the provider supplies word timestamps (the lab STT can). */
+  words?: WordTimestamp[];
 }
 
 export interface StreamingTranscriptionSession {

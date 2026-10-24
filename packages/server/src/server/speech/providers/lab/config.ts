@@ -8,6 +8,13 @@ export interface LabSpeechConfig {
   ttsUrl?: string;
   sttUrl?: string;
   ttsVoice: string;
+  /** Optional TTS controls, sent with every speak when set. */
+  ttsSpeed?: number;
+  ttsPitch?: number;
+  ttsEmotion?: string;
+  /** PC-local providers (same wire protocol), tried after the lab and before the stock provider. */
+  pcTtsUrl?: string;
+  pcSttUrl?: string;
   connectTimeoutMs: number;
   idleTimeoutMs?: number;
 }
@@ -19,7 +26,22 @@ export interface LabSpeechConfig {
  *   PASEO_LAB_TTS_VOICE           voice or profile id (default: the locked preset)
  *   PASEO_LAB_CONNECT_TIMEOUT_MS  connect timeout before falling back (default 1500)
  *   PASEO_LAB_TTS_IDLE_TIMEOUT_MS first-audio / between-frame timeout for TTS (default 3000)
+ *   PASEO_LAB_TTS_SPEED           speech rate multiplier (finite, > 0); unset: server default
+ *   PASEO_LAB_TTS_PITCH           pitch shift (finite number); unset: server default
+ *   PASEO_LAB_TTS_EMOTION         emotion label; unset: server default
+ *   PASEO_PC_TTS_URL              ws(s) URL of a TTS server on the PC, used when the lab is down
+ *   PASEO_PC_STT_URL              ws(s) URL of an STT server on the PC, used when the lab is down
  */
+function positiveNumber(raw: string | undefined): number | undefined {
+  const n = raw?.trim() ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function finiteNumber(raw: string | undefined): number | undefined {
+  const n = raw?.trim() ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function resolveLabSpeechConfig(env: NodeJS.ProcessEnv = process.env): LabSpeechConfig {
   const timeout = Number(env.PASEO_LAB_CONNECT_TIMEOUT_MS);
   const idle = Number(env.PASEO_LAB_TTS_IDLE_TIMEOUT_MS);
@@ -27,6 +49,11 @@ export function resolveLabSpeechConfig(env: NodeJS.ProcessEnv = process.env): La
     ttsUrl: env.PASEO_LAB_TTS_URL?.trim() || undefined,
     sttUrl: env.PASEO_LAB_STT_URL?.trim() || undefined,
     ttsVoice: env.PASEO_LAB_TTS_VOICE?.trim() || LAB_DEFAULT_TTS_VOICE,
+    ttsSpeed: positiveNumber(env.PASEO_LAB_TTS_SPEED),
+    ttsPitch: finiteNumber(env.PASEO_LAB_TTS_PITCH),
+    ttsEmotion: env.PASEO_LAB_TTS_EMOTION?.trim() || undefined,
+    pcTtsUrl: env.PASEO_PC_TTS_URL?.trim() || undefined,
+    pcSttUrl: env.PASEO_PC_STT_URL?.trim() || undefined,
     connectTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : LAB_CONNECT_TIMEOUT_MS,
     idleTimeoutMs: Number.isFinite(idle) && idle > 0 ? idle : LAB_IDLE_TIMEOUT_MS,
   };
