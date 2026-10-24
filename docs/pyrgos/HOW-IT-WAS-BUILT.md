@@ -112,6 +112,20 @@ Entries are in build order, without dates. Each carries a status: verified (with
 
 Decision log for the voice conversation agent in this fork. Ordered by build sequence; no dates.
 
+## Lab speech controls, word timestamps and PC fallback (MIC-750 D2)
+
+- **Decided:** add optional TTS `speed`, `pitch` and `emotion` (config defaults plus per-request overrides), optional word timestamps on STT transcripts, and a PC-local tier in the failover order lab -> PC local -> stock. **Who:** the overseer set the scope; Claude designed and implemented it.
+- **Chosen:** the PC tier is a second `LabTTS` / `LabSTT` instance pointed at a PC server that speaks the lab wire protocol, chained as the lab's fallback. This reuses the existing failover and replay path in `stt.ts` unchanged. **Rejected:** a separate Windows-native provider (SAPI or similar): a second code path, no way to test it here.
+- **Chosen:** `words` is an optional field on the transcript event; stock providers never set it, so the shared interface is unchanged for them.
+- **Found by reading the backend:** the lab TTS server ignores `speed` (hardcoded 1.0) and has no pitch or emotion control; the lab STT server runs with `without_timestamps=True` and emits no words; neither server returns TTS alignment. **Rejected:** faking any of these client-side (resampling for pitch, estimating word times). The client sends the fields and parses `words` when present; `docs/pyrgos/lab-speech.md` lists what is unsupported.
+- **Consequence:** the options and timestamps become live the moment the lab servers read them; until then they are harmless extra fields.
+- **Status:** verified by unit tests against a fake websocket lab (field passthrough, overrides, word parsing, lab -> PC -> stock order for TTS and STT). **Assumed:** the PC tier on Windows (PC-CHECK, untested) and the lab servers' behaviour once they read the new fields.
+
+## Open questions
+
+- Does the PC-local server start and take over when the lab is down? Settle with the PC-CHECK command in `lab-speech.md`.
+- Which lab-side change lands first: Kokoro `speed` passthrough or faster-whisper `word_timestamps`?
+
 ## Local Android and desktop builds (MIC-750 E)
 
 - **Decided:** build the APKs locally with Gradle through scripted wrappers (`scripts/pyrgos/build-android.sh` and `.ps1`), not through EAS cloud. **Who:** the overseer set the ticket; Claude implemented.

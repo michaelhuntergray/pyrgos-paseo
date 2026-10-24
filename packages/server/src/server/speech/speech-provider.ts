@@ -21,6 +21,14 @@ export interface StreamingTranscriptionCommittedEvent {
   previousSegmentId: string | null;
 }
 
+/** Word-level timing, in seconds from the start of the utterance. */
+export interface WordTimestamp {
+  word: string;
+  start: number;
+  end: number;
+  probability?: number;
+}
+
 export interface StreamingTranscriptionEvent {
   segmentId: string;
   transcript: string;
@@ -29,6 +37,8 @@ export interface StreamingTranscriptionEvent {
   logprobs?: LogprobToken[];
   avgLogprob?: number;
   isLowConfidence?: boolean;
+  /** Present only when the provider supplies word timestamps (the lab STT can). */
+  words?: WordTimestamp[];
 }
 
 export interface StreamingTranscriptionSession {
@@ -63,6 +73,13 @@ export interface SpeechStreamResult {
   format: string;
 }
 
+/** Per-request TTS controls; providers that do not support them ignore the argument. */
+export interface SpeechSynthesisOptions {
+  speed?: number;
+  pitch?: number;
+  emotion?: string;
+}
+
 export interface TextToSpeechProvider {
-  synthesizeSpeech(text: string): Promise<SpeechStreamResult>;
+  synthesizeSpeech(text: string, options?: SpeechSynthesisOptions): Promise<SpeechStreamResult>;
 }
