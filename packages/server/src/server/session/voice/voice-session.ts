@@ -1063,8 +1063,10 @@ export class VoiceSession {
     }
 
     if (this.conversationFactory) {
+      // Capture before the flush: a barge-in during it must invalidate this transcript.
+      const generation = this.conversationGeneration;
       await this.flushPendingAudioSegments("transcription complete");
-      this.runConversationTurn(transcriptText);
+      this.runConversationTurn(transcriptText, generation);
       return;
     }
 
@@ -1105,10 +1107,10 @@ export class VoiceSession {
   }
 
   /** Fire and forget: the turn runs to its end while the next utterance may barge in. */
-  private runConversationTurn(text: string): void {
+  private runConversationTurn(text: string, generation: number): void {
+    if (generation !== this.conversationGeneration) return;
     const conversation = this.getConversation();
     if (!conversation) return;
-    const generation = this.conversationGeneration;
     void conversation
       .then((c) => {
         // The factory can resolve after cleanup or after the user spoke again; a stale transcript
@@ -1135,7 +1137,7 @@ export class VoiceSession {
     const text = redact(event.text);
     this.speechQueue = this.speechQueue
       .then(async () => {
-        if (this.closed || signal.aborted) return;
+        if (this.closed || signal.aborted) return undefined;
         this.emit({
           type: "activity_log",
           payload: { id: uuidv4(), timestamp: new Date(), type: "assistant", content: text },
@@ -1146,6 +1148,7 @@ export class VoiceSession {
           signal,
           true,
         );
+        return undefined;
       })
       .catch((error) => {
         this.sessionLogger.warn({ err: error }, "Voice conversation playback failed");

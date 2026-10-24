@@ -375,6 +375,40 @@ describe("VoiceSession conversation: reviewer inputs", () => {
     await parts.voiceSession.cleanup();
   });
 
+  test("a barge-in while the post-transcript flush is pending drops the old transcript", async () => {
+    const heard: string[] = [];
+    const bargeIn = vi.fn(async () => {});
+    const parts = createVoiceSession(null, async () => ({
+      handleTranscript: async (text) => void heard.push(text),
+      bargeIn,
+      close: async () => {},
+    }));
+    // The flush is pending (as it is while buffered audio is transcribed); the user speaks inside it.
+    const flush = vi
+      .spyOn(
+        VoiceSession.prototype as unknown as {
+          flushPendingAudioSegments: (reason: string) => Promise<void>;
+        },
+        "flushPendingAudioSegments",
+      )
+      .mockImplementation(async () => {
+        // The turn controller can still be capturing here, so call the session's barge-in directly.
+        await (
+          parts.voiceSession as unknown as { handleVoiceSpeechStart: () => Promise<void> }
+        ).handleVoiceSpeechStart();
+      });
+    try {
+      await finalTranscript(parts, "first");
+      await vi.waitFor(() => expect(flush).toHaveBeenCalled());
+      await settle();
+      await settle();
+      expect(heard).toEqual([]);
+    } finally {
+      flush.mockRestore();
+    }
+    await parts.voiceSession.cleanup();
+  });
+
   test("a thrown turn error is redacted in the log", async () => {
     const lines: string[] = [];
     const logger = pino({ level: "error" }, {

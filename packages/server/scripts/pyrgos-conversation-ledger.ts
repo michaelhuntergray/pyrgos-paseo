@@ -4,11 +4,10 @@
 // Env: ALCHEMIST_HARNESS, ALCHEMIST_WORKSHOP, PYRGOS_DISPATCH_CMD (dispatch.sh), PYRGOS_DISPATCH_EXTRA_ARGS
 // (for example "--dry-run --test none"), the announce line is printed, not sent.
 import { createPyrgosConversation } from "../src/server/pyrgos/conversation.js";
+import { parseConversationArgs } from "./pyrgos-conversation-args.js";
 
-const args = process.argv.slice(2);
-const mi = args.indexOf("--model");
-if (mi >= 0) process.env.PYRGOS_CONVERSATION_MODEL = args[mi + 1];
-const turns = args.filter((_, i) => i !== mi && i !== mi + 1 && !args[i]?.startsWith("--"));
+const { model, turns } = parseConversationArgs(process.argv.slice(2));
+if (model !== undefined) process.env.PYRGOS_CONVERSATION_MODEL = model;
 if (turns.length === 0) {
   console.error('usage: pyrgos-conversation-ledger.ts "<turn>"... [--model haiku|sonnet|opus]');
   process.exit(2);
