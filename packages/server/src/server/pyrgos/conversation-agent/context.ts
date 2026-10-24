@@ -25,7 +25,8 @@ export const readTextFile: TextReader = async (absolutePath) => {
 
 async function readSection(read: TextReader, file: string, limit: number): Promise<string> {
   const body = await read(file);
-  return body ? redact(body.trim()).slice(0, limit) : "";
+  // Cap before redacting: only the first `limit` chars are kept, so a huge file never costs a full scan (MIC-761)
+  return body ? redact(body.trim().slice(0, limit * 2)).slice(0, limit) : "";
 }
 
 /** Harness context block for the system prompt, or "" when there is no harness root. */
