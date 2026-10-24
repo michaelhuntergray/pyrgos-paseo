@@ -105,3 +105,14 @@ describe("agree_action needs a plain yes", () => {
     expect(t.launch).not.toHaveBeenCalled();
   });
 });
+
+describe("agree_action refuses a yes that names something else", () => {
+  it("refuses 'Yes, to the other proposal.'", async () => {
+    const t = setup();
+    const id = /id (\S+)/.exec(await t.run("propose_action", { item: "ship it" }))![1]!;
+    await t.run("refine_action", { id, scope: "s", project: "p", doneCriteria: "d" });
+    t.say("Yes, to the other proposal.");
+    expect(await t.run("agree_action", { id })).toContain("has not said yes");
+    expect(t.launch).not.toHaveBeenCalled();
+  });
+});

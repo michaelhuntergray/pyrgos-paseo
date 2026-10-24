@@ -123,6 +123,7 @@ function extraDispatchArgs(raw: string | undefined): string[] {
   const out: string[] = [];
   const tokens = (raw ?? "").split(/\s+/).filter(Boolean);
   for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === "--") continue; // an end-of-options marker would hide the validated --cwd
     const flag = tokens[i]!.split("=")[0]!;
     if (RESERVED_FLAGS.has(flag)) {
       if (!tokens[i]!.includes("=")) i += 1;

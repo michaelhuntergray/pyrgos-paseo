@@ -152,3 +152,19 @@ describe("dispatch launcher: extra args", () => {
     expect(args.filter((a) => a === "--cwd")).toHaveLength(1);
   });
 });
+
+describe("dispatch launcher: end-of-options marker", () => {
+  it("drops a bare -- from PYRGOS_DISPATCH_EXTRA_ARGS so --cwd stays an option", async () => {
+    const { root, env } = fixture();
+    const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    const launch = createDispatchLauncher({
+      env: { ...env, PYRGOS_DISPATCH_EXTRA_ARGS: "--" },
+      spawnFn,
+      settleMs: 5,
+      logDir: root,
+    });
+    await launch(item());
+    const [, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
+    expect(args).not.toContain("--");
+  });
+});

@@ -230,6 +230,7 @@ export class VoiceSession {
   private voiceModeAgentId: string | null = null;
   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
 
+  private conversationGeneration = 0;
   private readonly conversationFactory: VoiceSessionOptions["conversation"];
   private conversation: Promise<VoiceConversation> | null = null;
   private speechQueue: Promise<void> = Promise.resolve();
@@ -1107,14 +1108,19 @@ export class VoiceSession {
   private runConversationTurn(text: string): void {
     const conversation = this.getConversation();
     if (!conversation) return;
+    const generation = this.conversationGeneration;
     void conversation
       .then((c) => {
-        // The factory can resolve after cleanup; a late transcript must not reach the ledger.
-        if (this.closed) return undefined;
+        // The factory can resolve after cleanup or after the user spoke again; a stale transcript
+        // must not reach the ledger or play over the user.
+        if (this.closed || generation !== this.conversationGeneration) return undefined;
         return c.handleTranscript(text);
       })
       .catch((error) => {
-        this.sessionLogger.error({ err: error }, "Voice conversation turn failed");
+        this.sessionLogger.error(
+          { message: redact(error instanceof Error ? error.message : String(error)) },
+          "Voice conversation turn failed",
+        );
       });
   }
 
@@ -1275,6 +1281,7 @@ export class VoiceSession {
     this.clearBufferTimeout();
 
     this.abortController.abort();
+    this.conversationGeneration += 1;
     void this.conversation?.then((c) => c.bargeIn()).catch(() => undefined);
     await this.handleAbort();
 

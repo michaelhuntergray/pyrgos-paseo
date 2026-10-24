@@ -15,8 +15,9 @@ export function isAffirmative(text: string): boolean {
   return YES.test(text) && !NO.test(text);
 }
 
+// Nothing may follow the yes word but politeness: "yes, to the other proposal" names something else.
 const PLAIN_YES =
-  /^\W*(?:(?:ok|okay|well|um|uh|so|alright|all right|right)\W+)*(?:yes|yeah|yep|yup)\b/i;
+  /^\W*(?:(?:ok|okay|well|um|uh|so|alright|all right|right)\W+)*(?:yes|yeah|yep|yup)(?:\W+(?:please|thanks|thank you|sure|go ahead|do it))*\W*$/i;
 
 /** Stricter than isAffirmative: launching work needs an actual yes word, not "do it". */
 export function isPlainYes(text: string): boolean {
@@ -121,11 +122,11 @@ export function createLedgerTools(options: LedgerToolsOptions): ToolDef[] {
         guard(async () => {
           const id = String(args.id ?? "");
           const item = ledger.get(id);
-          if (!isPlainYes(options.latestUserText())) {
-            return "Not done: the user has not said yes in their latest message. Read the item back and ask.";
-          }
           if ((changedAt.get(item.id) ?? 0) >= options.turn()) {
             return "Not done: the user has not heard this item read back yet. Read it back and ask for a yes.";
+          }
+          if (!isPlainYes(options.latestUserText())) {
+            return "Not done: the user has not said yes in their latest message. Read the item back and ask.";
           }
           const agreed = await ledger.agree(id, { confirmed: true });
           return agreed.launchError
