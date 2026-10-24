@@ -15,6 +15,7 @@ import {
 } from "../../dictation/dictation-stream-manager.js";
 import { createVoiceTurnController, type VoiceTurnController } from "./voice-turn-controller.js";
 import { buildVoiceModeSystemPrompt, stripVoiceModeSystemPrompt } from "../../voice-config.js";
+import { redact } from "../../pyrgos/conversation-agent/redact.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { ManagedAgent } from "../../agent/agent-manager.js";
 import type { AgentSessionConfig } from "../../agent/agent-sdk-types.js";
@@ -1121,7 +1122,7 @@ export class VoiceSession {
     }
     if (event.type !== "speak") return;
     const signal = this.abortController.signal;
-    const text = event.text;
+    const text = redact(event.text);
     this.speechQueue = this.speechQueue
       .then(async () => {
         if (this.closed || signal.aborted) return;

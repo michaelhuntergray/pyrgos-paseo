@@ -82,3 +82,15 @@ describe("isAffirmative: reviewer inputs", () => {
     expect(isAffirmative(t)).toBe(true);
   });
 });
+
+describe("isAffirmative: reviewer inputs", () => {
+  it.each(["Yes, after I review it", "yes if the tests pass", "yeah but only on Friday"])(
+    "rejects a conditional yes: %s",
+    (t) => {
+      expect(isAffirmative(t)).toBe(false);
+    },
+  );
+  it.each(["yes please", "Okay, yes, go ahead.", "yes thanks"])("still accepts %s", (t) => {
+    expect(isAffirmative(t)).toBe(true);
+  });
+});

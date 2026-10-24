@@ -3,11 +3,12 @@ import { LedgerError, type Ledger, type LedgerItem } from "../ledger/ledger.js";
 import { redact } from "./redact.js";
 import type { ToolDef } from "./tools.js";
 
-// The yes must open the reply (after a filler word), so "I never said yes" is not consent.
+// The yes must open the reply (after a filler word), so "I never said yes" is not consent. A
+// condition after it ("yes, after I review it") is not a plain yes either.
 const YES =
   /^\W*(?:(?:ok|okay|well|um|uh|so|alright|all right|right)\W+)*(?:yes|yeah|yep|yup|do it|go ahead|go for it|confirm(?:ed)?|approved?|please do|make it so|sounds good)\b/i;
 const NO =
-  /\b(no|nope|not|never|don'?t|do not|wait|hold on|hold off|stop|cancel|never ?mind)\b|n't\b/i;
+  /\b(no|nope|not|never|don'?t|do not|wait|hold on|hold off|stop|cancel|never ?mind|after|before|if|unless|until|once|when|but|only|provided|as long as|first|later|tomorrow)\b|n't\b/i;
 
 /** True when the user's last words are a plain yes to a proposal. Code, not the model, decides. */
 export function isAffirmative(text: string): boolean {

@@ -72,12 +72,18 @@ export function createDispatchLauncher(
     if (!cwd) throw new Error(`project folder not found: ${item.project ?? "(none)"}`);
 
     const spec = `${item.item}. Scope: ${item.scope}. Done when: ${item.doneCriteria}. item:${item.id}`;
-    const args = ["worker", spec, "--cwd", cwd];
+    // Fixed extra flags for the dispatcher, e.g. "--dry-run --test none". Split on spaces, never a
+    // shell. They go before the validated --cwd/--ticket so a last-wins parser cannot be redirected,
+    // and --cwd/--ticket in them are dropped along with their values.
+    const args = [
+      "worker",
+      spec,
+      ...extraDispatchArgs(env.PYRGOS_DISPATCH_EXTRA_ARGS),
+      "--cwd",
+      cwd,
+    ];
     const ticket = /\bMIC-\d+\b/.exec(`${item.item} ${item.scope ?? ""}`)?.[0];
     if (ticket) args.push("--ticket", ticket);
-    // Fixed extra flags for the dispatcher, e.g. "--dry-run --test none". Split on spaces, never a shell.
-    const extra = (env.PYRGOS_DISPATCH_EXTRA_ARGS ?? "").split(/\s+/).filter(Boolean);
-    args.push(...extra);
 
     const logDir = options.logDir ?? voiceFeedDir(env);
     let logFd = -1;
@@ -109,4 +115,20 @@ export function createDispatchLauncher(
       if (logFd >= 0) closeSync(logFd);
     }
   };
+}
+
+const RESERVED_FLAGS = new Set(["--cwd", "--ticket"]);
+
+function extraDispatchArgs(raw: string | undefined): string[] {
+  const out: string[] = [];
+  const tokens = (raw ?? "").split(/\s+/).filter(Boolean);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const flag = tokens[i]!.split("=")[0]!;
+    if (RESERVED_FLAGS.has(flag)) {
+      if (!tokens[i]!.includes("=")) i += 1;
+      continue;
+    }
+    out.push(tokens[i]!);
+  }
+  return out;
 }

@@ -387,6 +387,52 @@ describe("VoiceSession conversation", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  test("redacts secrets from conversation speech before TTS and the activity log", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    const spoken: string[] = [];
+    const synth = vi.spyOn(tts, "synthesizeSpeech").mockImplementation(async (text: string) => {
+      spoken.push(text);
+      return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+    });
+    const { voiceSession, detector, sttSession, host } = createVoiceSession(
+      tts,
+      async (onEvent) => ({
+        handleTranscript: async () => {
+          onEvent({
+            type: "speak",
+            text: "The config says API_KEY=hunter2secret ok",
+            kind: "reply",
+          });
+        },
+        bargeIn: async () => {},
+        close: async () => {},
+      }),
+    );
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "read the config",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(spoken.length).toBeGreaterThan(0));
+    expect(synth).toHaveBeenCalled();
+    expect(spoken.join(" ")).not.toContain("hunter2secret");
+    expect(JSON.stringify(host.emitted)).not.toContain("hunter2secret");
+    await voiceSession.cleanup();
+  });
+
   test("cleanup does not hang when the conversation factory never resolves", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
