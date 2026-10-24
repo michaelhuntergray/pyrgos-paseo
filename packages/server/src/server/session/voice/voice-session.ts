@@ -1151,7 +1151,10 @@ export class VoiceSession {
         return undefined;
       })
       .catch((error) => {
-        this.sessionLogger.warn({ err: error }, "Voice conversation playback failed");
+        this.sessionLogger.warn(
+          { message: redact(error instanceof Error ? error.message : String(error)) },
+          "Voice conversation playback failed",
+        );
       });
   }
 

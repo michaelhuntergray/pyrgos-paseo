@@ -430,4 +430,31 @@ describe("VoiceSession conversation: reviewer inputs", () => {
     expect(lines.join("")).not.toContain("hunter2secret");
     await parts.voiceSession.cleanup();
   });
+
+  test("a TTS playback failure is redacted in the log", async () => {
+    const lines: string[] = [];
+    const logger = pino({ level: "warn" }, {
+      write: (line: string) => void lines.push(line),
+    } as unknown as NodeJS.WritableStream);
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        throw new Error("API_KEY=hunter2secret");
+      },
+    };
+    const parts = createVoiceSession(
+      tts,
+      async (onEvent) => ({
+        handleTranscript: async () => {
+          onEvent({ type: "speak", text: "hello there", kind: "reply" });
+        },
+        bargeIn: async () => {},
+        close: async () => {},
+      }),
+      logger,
+    );
+    await finalTranscript(parts, "hello");
+    await vi.waitFor(() => expect(lines.join("")).toContain("Voice conversation playback failed"));
+    expect(lines.join("")).not.toContain("hunter2secret");
+    await parts.voiceSession.cleanup();
+  });
 });
