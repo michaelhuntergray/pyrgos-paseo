@@ -117,6 +117,15 @@ describe("agree_action refuses a yes that names something else", () => {
   });
 });
 
+describe("isPlainYes: politeness before the yes", () => {
+  it.each(["Please, yes.", "Thanks, yes."])("accepts %s", (t) => {
+    expect(isPlainYes(t)).toBe(true);
+  });
+  it.each(["Please, yes, but wait", "Thanks, yes, to the other proposal"])("rejects %s", (t) => {
+    expect(isPlainYes(t)).toBe(false);
+  });
+});
+
 describe("isPlainYes: reviewer inputs", () => {
   it.each(["sure", "ok", "do it", "go ahead", "Yes, please.", "okay, yes"])("accepts %s", (t) => {
     expect(isPlainYes(t)).toBe(true);
