@@ -153,6 +153,24 @@ describe("dispatch launcher: extra args", () => {
   });
 });
 
+describe("dispatch launcher: malformed reserved flag", () => {
+  it.each(["--cwd --dry-run", "--ticket", "--dry-run --cwd"])(
+    "rejects PYRGOS_DISPATCH_EXTRA_ARGS=%s without spawning",
+    async (extra) => {
+      const { root, env } = fixture();
+      const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+      const launch = createDispatchLauncher({
+        env: { ...env, PYRGOS_DISPATCH_EXTRA_ARGS: extra },
+        spawnFn,
+        settleMs: 5,
+        logDir: root,
+      });
+      await expect(launch(item())).rejects.toThrow("needs a value");
+      expect(spawnFn).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe("dispatch launcher: end-of-options marker", () => {
   it("drops a bare -- from PYRGOS_DISPATCH_EXTRA_ARGS so --cwd stays an option", async () => {
     const { root, env } = fixture();

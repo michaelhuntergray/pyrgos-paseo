@@ -121,7 +121,13 @@ function extraDispatchArgs(raw: string | undefined): string[] {
     if (tokens[i] === "--") continue; // an end-of-options marker would hide the validated --cwd
     const flag = tokens[i]!.split("=")[0]!;
     if (RESERVED_FLAGS.has(flag)) {
-      if (!tokens[i]!.includes("=")) i += 1;
+      if (!tokens[i]!.includes("=")) {
+        const value = tokens[i + 1];
+        if (value === undefined || value.startsWith("-")) {
+          throw new Error(`PYRGOS_DISPATCH_EXTRA_ARGS: ${flag} needs a value`);
+        }
+        i += 1;
+      }
       continue;
     }
     out.push(tokens[i]!);

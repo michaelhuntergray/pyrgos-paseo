@@ -132,6 +132,12 @@ describe("isPlainYes: qualifier prefixes are not politeness", () => {
   });
 });
 
+describe("isPlainYes: filler words are not politeness", () => {
+  it.each(["Uh, yes.", "um, yes"])("rejects %s", (t) => {
+    expect(isPlainYes(t)).toBe(false);
+  });
+});
+
 describe("isPlainYes: reviewer inputs", () => {
   it.each(["sure", "ok", "do it", "go ahead", "Yes, please.", "okay, yes"])("accepts %s", (t) => {
     expect(isPlainYes(t)).toBe(true);

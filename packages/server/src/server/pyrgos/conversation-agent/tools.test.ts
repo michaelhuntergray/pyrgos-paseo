@@ -76,7 +76,11 @@ describe("harness tools", () => {
       await writeFile(path.join(root, name), "x\n");
       expect(await read.run({ path: name })).toMatch(/Not allowed/);
     }
-    for (const name of ["secrets.production.json", "credentials.local.yaml", "secret.prod.env.bak"]) {
+    for (const name of [
+      "secrets.production.json",
+      "credentials.local.yaml",
+      "secret.prod.env.bak",
+    ]) {
       await writeFile(path.join(root, name), "x\n");
       expect(await read.run({ path: name })).toMatch(/Not allowed/);
     }
