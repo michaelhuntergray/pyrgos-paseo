@@ -143,7 +143,7 @@ describe("dispatch launcher: extra args", () => {
     expect(args.join(" ")).not.toContain("/tmp/o2");
     expect(args).not.toContain("MIC-99");
     expect(args).toContain("--dry-run");
-    expect(args.slice(-4)).toEqual([
+    expect(args.slice(2, 6)).toEqual([
       "--cwd",
       join(root, "Professional", "demo"),
       "--ticket",
@@ -166,5 +166,27 @@ describe("dispatch launcher: end-of-options marker", () => {
     await launch(item());
     const [, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
     expect(args).not.toContain("--");
+  });
+});
+
+describe("dispatch launcher: fixed flags first", () => {
+  it("keeps --cwd and --ticket ahead of extra args that take a value", async () => {
+    const { root, env } = fixture();
+    const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    const launch = createDispatchLauncher({
+      env: { ...env, PYRGOS_DISPATCH_EXTRA_ARGS: "--test" },
+      spawnFn,
+      settleMs: 5,
+      logDir: root,
+    });
+    await launch(item());
+    const [, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
+    expect(args.slice(2)).toEqual([
+      "--cwd",
+      join(root, "Professional", "demo"),
+      "--ticket",
+      "MIC-12",
+      "--test",
+    ]);
   });
 });

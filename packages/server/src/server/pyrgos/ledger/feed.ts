@@ -43,7 +43,13 @@ async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
       await handle.close();
       return () => rm(lockPath, { force: true });
     } catch (error) {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+      if (!(error instanceof Error) || !("code" in error)) throw error;
+      // Windows reports a lock file another writer is deleting as EPERM/EACCES/EBUSY, not EEXIST.
+      const contended =
+        error.code === "EEXIST" ||
+        (process.platform === "win32" &&
+          (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY"));
+      if (!contended) throw error;
       const age = await stat(lockPath).then(
         (info) => Date.now() - info.mtimeMs,
         () => 0,

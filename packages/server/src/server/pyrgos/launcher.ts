@@ -73,17 +73,12 @@ export function createDispatchLauncher(
 
     const spec = `${item.item}. Scope: ${item.scope}. Done when: ${item.doneCriteria}. item:${item.id}`;
     // Fixed extra flags for the dispatcher, e.g. "--dry-run --test none". Split on spaces, never a
-    // shell. They go before the validated --cwd/--ticket so a last-wins parser cannot be redirected,
-    // and --cwd/--ticket in them are dropped along with their values.
-    const args = [
-      "worker",
-      spec,
-      ...extraDispatchArgs(env.PYRGOS_DISPATCH_EXTRA_ARGS),
-      "--cwd",
-      cwd,
-    ];
+    // shell. The validated --cwd/--ticket come first so an extra flag that takes a value cannot
+    // swallow them; --cwd/--ticket in the extras are dropped along with their values.
+    const args = ["worker", spec, "--cwd", cwd];
     const ticket = /\bMIC-\d+\b/.exec(`${item.item} ${item.scope ?? ""}`)?.[0];
     if (ticket) args.push("--ticket", ticket);
+    args.push(...extraDispatchArgs(env.PYRGOS_DISPATCH_EXTRA_ARGS));
 
     const logDir = options.logDir ?? voiceFeedDir(env);
     let logFd = -1;

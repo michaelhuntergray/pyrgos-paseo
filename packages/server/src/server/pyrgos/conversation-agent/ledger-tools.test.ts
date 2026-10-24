@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLedger, type LedgerItem } from "../ledger/ledger.js";
-import { createLedgerTools, isAffirmative } from "./ledger-tools.js";
+import { createLedgerTools, isAffirmative, isPlainYes } from "./ledger-tools.js";
 
 function setup() {
   const rows: LedgerItem[] = [];
@@ -96,7 +96,7 @@ describe("isAffirmative: reviewer inputs", () => {
 });
 
 describe("agree_action needs a plain yes", () => {
-  it.each(["do it", "go ahead", "make it so"])("refuses %s on a refined item", async (said) => {
+  it.each(["make it so", "sounds good"])("refuses %s on a refined item", async (said) => {
     const t = setup();
     const id = /id (\S+)/.exec(await t.run("propose_action", { item: "ship it" }))![1]!;
     await t.run("refine_action", { id, scope: "s", project: "p", doneCriteria: "d" });
@@ -115,4 +115,16 @@ describe("agree_action refuses a yes that names something else", () => {
     expect(await t.run("agree_action", { id })).toContain("has not said yes");
     expect(t.launch).not.toHaveBeenCalled();
   });
+});
+
+describe("isPlainYes: reviewer inputs", () => {
+  it.each(["sure", "ok", "do it", "go ahead", "Yes, please.", "okay, yes"])("accepts %s", (t) => {
+    expect(isPlainYes(t)).toBe(true);
+  });
+  it.each(["Well, yes", "yes, to the other proposal", "never mind", "ok but wait"])(
+    "rejects %s",
+    (t) => {
+      expect(isPlainYes(t)).toBe(false);
+    },
+  );
 });

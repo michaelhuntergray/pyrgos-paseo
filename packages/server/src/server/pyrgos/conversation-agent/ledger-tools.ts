@@ -17,11 +17,11 @@ export function isAffirmative(text: string): boolean {
 
 // Nothing may follow the yes word but politeness: "yes, to the other proposal" names something else.
 const PLAIN_YES =
-  /^\W*(?:(?:ok|okay|well|um|uh|so|alright|all right|right)\W+)*(?:yes|yeah|yep|yup)(?:\W+(?:please|thanks|thank you|sure|go ahead|do it))*\W*$/i;
+  /^\W*(?:(?:ok|okay|um|uh|so|alright|all right|right)\W+)*(?:yes|yeah|yep|yup|sure|ok|okay|do it|go ahead)(?:\W+(?:please|thanks|thank you|sure|go ahead|do it))*\W*$/i;
 
-/** Stricter than isAffirmative: launching work needs an actual yes word, not "do it". */
+/** Stricter than isAffirmative: launching work needs a bare affirmative with only politeness around it. */
 export function isPlainYes(text: string): boolean {
-  return isAffirmative(text) && PLAIN_YES.test(text);
+  return PLAIN_YES.test(text) && !NO.test(text);
 }
 
 export interface LedgerToolsOptions {
