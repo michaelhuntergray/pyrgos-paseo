@@ -38,6 +38,35 @@ function fakeChild() {
 }
 
 describe("dispatch launcher", () => {
+  it("starts a Windows dispatcher with a hidden console and a log handle", async () => {
+    const { root, env } = fixture();
+    const child = fakeChild();
+    const spawnFn = vi.fn(() => child) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({ env, platform: "win32", spawnFn, settleMs: 5, logDir: root })(
+      item(),
+    );
+    expect(spawnFn.mock.calls[0]?.[2]).toEqual({
+      detached: false,
+      windowsHide: true,
+      stdio: ["ignore", expect.any(Number), expect.any(Number)],
+    });
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("starts a Linux dispatcher detached with a log handle", async () => {
+    const { root, env } = fixture();
+    const child = fakeChild();
+    const spawnFn = vi.fn(() => child) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({ env, platform: "linux", spawnFn, settleMs: 5, logDir: root })(
+      item(),
+    );
+    expect(spawnFn.mock.calls[0]?.[2]).toEqual({
+      detached: true,
+      stdio: ["ignore", expect.any(Number), expect.any(Number)],
+    });
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
   it("runs a PowerShell dispatcher with Windows flags and a fixed argv", async () => {
     const { root, env } = fixture();
     const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
@@ -69,7 +98,7 @@ describe("dispatch launcher", () => {
         "-Test",
         "none",
       ],
-      expect.any(Number),
+      expect.objectContaining({ stdio: ["ignore", expect.any(Number), expect.any(Number)] }),
     );
   });
 
@@ -111,7 +140,7 @@ describe("dispatch launcher", () => {
         "--ticket",
         "MIC-12",
       ],
-      expect.any(Number),
+      expect.objectContaining({ stdio: ["ignore", expect.any(Number), expect.any(Number)] }),
     );
   });
 

@@ -1,22 +1,22 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { voiceFeedDir } from "./ledger/jsonl-store.js";
 import type { LedgerItem } from "./ledger/ledger.js";
 
-export type SpawnFn = (file: string, args: string[], logFd: number) => ChildProcess;
+export type SpawnFn = (file: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 export interface DispatchLauncherOptions {
   env?: NodeJS.ProcessEnv;
-  /** Seam for tests. Default spawns detached with output to the log file. */
+  /** Seam for tests. Default spawns with output to the log file. */
   spawnFn?: SpawnFn;
+  platform?: NodeJS.Platform;
   /** How long a non-zero exit still counts as a failed launch. */
   settleMs?: number;
   logDir?: string;
 }
 
-const defaultSpawn: SpawnFn = (file, args, logFd) =>
-  spawn(file, args, { detached: true, stdio: ["ignore", logFd, logFd] });
+const defaultSpawn: SpawnFn = (file, args, options) => spawn(file, args, options);
 
 /**
  * Folder of `project` under `<workshop>/<group>/`, or null. The name must be a single path
@@ -61,6 +61,7 @@ export function createDispatchLauncher(
 ): (item: LedgerItem) => Promise<void> {
   const env = options.env ?? process.env;
   const run = options.spawnFn ?? defaultSpawn;
+  const platform = options.platform ?? process.platform;
   const settleMs = options.settleMs ?? 2000;
 
   return async (item) => {
@@ -95,7 +96,11 @@ export function createDispatchLauncher(
     } catch {
       logFd = -1;
     }
-    const child = run(file, args, logFd);
+    const child = run(file, args, {
+      detached: platform !== "win32",
+      ...(platform === "win32" ? { windowsHide: true } : {}),
+      stdio: ["ignore", logFd, logFd],
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
