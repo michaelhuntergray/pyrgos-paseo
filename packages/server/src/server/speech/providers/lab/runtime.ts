@@ -22,29 +22,57 @@ export function applyLabSpeechServices(params: {
   let ttsService: TextToSpeechProvider | null = existing.ttsService;
   let sttService: SpeechToTextProvider | null = existing.sttService;
 
-  if (config.ttsUrl && providers.voiceTts.enabled !== false) {
-    ttsService = new LabTTS(
-      {
-        url: config.ttsUrl,
-        voice: config.ttsVoice,
-        connectTimeoutMs: config.connectTimeoutMs,
-        idleTimeoutMs: config.idleTimeoutMs,
-        fallback: existing.ttsService,
-      },
-      logger,
+  const ttsBase = {
+    voice: config.ttsVoice,
+    speed: config.ttsSpeed,
+    pitch: config.ttsPitch,
+    emotion: config.ttsEmotion,
+    connectTimeoutMs: config.connectTimeoutMs,
+    idleTimeoutMs: config.idleTimeoutMs,
+  };
+
+  // Order: lab -> PC local -> stock. The PC tier speaks the lab wire protocol and is optional.
+  if ((config.ttsUrl || config.pcTtsUrl) && providers.voiceTts.enabled !== false) {
+    let chain: TextToSpeechProvider | null = existing.ttsService;
+    if (config.pcTtsUrl) {
+      chain = new LabTTS({ ...ttsBase, url: config.pcTtsUrl, fallback: chain }, logger);
+    }
+    if (config.ttsUrl) {
+      chain = new LabTTS({ ...ttsBase, url: config.ttsUrl, fallback: chain }, logger);
+    }
+    ttsService = chain;
+    logger.info(
+      { lab: Boolean(config.ttsUrl), pc: Boolean(config.pcTtsUrl) },
+      "Lab TTS enabled (stock provider is the last fallback)",
     );
-    logger.info("Lab TTS enabled (stock provider is the fallback)");
   }
-  if (config.sttUrl && providers.voiceStt.enabled !== false) {
-    sttService = new LabSTT(
-      {
-        url: config.sttUrl,
-        connectTimeoutMs: config.connectTimeoutMs,
-        fallback: existing.sttService,
-      },
-      logger,
+  if ((config.sttUrl || config.pcSttUrl) && providers.voiceStt.enabled !== false) {
+    let chain: SpeechToTextProvider | null = existing.sttService;
+    if (config.pcSttUrl) {
+      chain = new LabSTT(
+        {
+          url: config.pcSttUrl,
+          connectTimeoutMs: config.connectTimeoutMs,
+          fallback: chain,
+        },
+        logger,
+      );
+    }
+    if (config.sttUrl) {
+      chain = new LabSTT(
+        {
+          url: config.sttUrl,
+          connectTimeoutMs: config.connectTimeoutMs,
+          fallback: chain,
+        },
+        logger,
+      );
+    }
+    sttService = chain;
+    logger.info(
+      { lab: Boolean(config.sttUrl), pc: Boolean(config.pcSttUrl) },
+      "Lab STT enabled (stock provider is the last fallback)",
     );
-    logger.info("Lab STT enabled (stock provider is the fallback)");
   }
   return { ...existing, ttsService, sttService };
 }

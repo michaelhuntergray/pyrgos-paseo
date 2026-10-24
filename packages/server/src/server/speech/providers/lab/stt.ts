@@ -2,7 +2,11 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type pino from "pino";
 import { WebSocket } from "ws";
-import type { SpeechToTextProvider, StreamingTranscriptionSession } from "../../speech-provider.js";
+import type {
+  SpeechToTextProvider,
+  StreamingTranscriptionSession,
+  WordTimestamp,
+} from "../../speech-provider.js";
 import { LAB_STT_SAMPLE_RATE } from "./config.js";
 
 export interface LabSttOptions {
@@ -10,6 +14,28 @@ export interface LabSttOptions {
   connectTimeoutMs: number;
   /** Used when the lab cannot be reached at connect(). */
   fallback: SpeechToTextProvider | null;
+}
+
+/** Keeps only well-formed {word,start,end} entries (0 <= start <= end; probability kept only in [0,1]); undefined when none survive. */
+export function parseWords(raw: unknown): WordTimestamp[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const words: WordTimestamp[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const { word, start, end, probability } = item as Record<string, unknown>;
+    if (typeof word !== "string" || typeof start !== "number" || typeof end !== "number") continue;
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (start < 0 || end < start) continue;
+    words.push({
+      word,
+      start,
+      end,
+      ...(typeof probability === "number" && probability >= 0 && probability <= 1
+        ? { probability }
+        : {}),
+    });
+  }
+  return words.length > 0 ? words : undefined;
 }
 
 /** Linear-interpolation resample of PCM16LE mono; only used on the fallback path. */
@@ -49,7 +75,10 @@ export class LabSTT implements SpeechToTextProvider {
     prompt?: string;
   }): StreamingTranscriptionSession {
     const { options } = this;
-    const logger = params.logger.child({ provider: "lab", component: "stt-session" });
+    const logger = params.logger.child({
+      provider: "lab",
+      component: "stt-session",
+    });
     const emitter = new EventEmitter();
     let ws: WebSocket | null = null;
     let delegate: StreamingTranscriptionSession | null = null;
@@ -79,7 +108,9 @@ export class LabSTT implements SpeechToTextProvider {
 
     const openLab = (): Promise<void> =>
       new Promise((resolve, reject) => {
-        const socket = new WebSocket(options.url, { handshakeTimeout: options.connectTimeoutMs });
+        const socket = new WebSocket(options.url, {
+          handshakeTimeout: options.connectTimeoutMs,
+        });
         pending = socket;
         let opened = false;
         socket.on("open", () => {
@@ -103,7 +134,12 @@ export class LabSTT implements SpeechToTextProvider {
         });
         socket.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
           if (isBinary || ws !== socket) return;
-          let message: { type?: string; text?: string; message?: string };
+          let message: {
+            type?: string;
+            text?: string;
+            message?: string;
+            words?: unknown;
+          };
           try {
             message = JSON.parse(data.toString());
           } catch {
@@ -111,11 +147,13 @@ export class LabSTT implements SpeechToTextProvider {
           }
           if (message.type === "partial" || message.type === "final") {
             const isFinal = message.type === "final";
+            const words = parseWords(message.words);
             emitter.emit("transcript", {
               segmentId,
               transcript: message.text ?? "",
               isFinal,
               language: params.language,
+              ...(words ? { words } : {}),
             });
             if (isFinal) {
               utterance.length = 0;
@@ -174,7 +212,10 @@ export class LabSTT implements SpeechToTextProvider {
         else emitter.emit("committed", p);
       });
       session.on("transcript", (p) =>
-        emitter.emit("transcript", { ...p, segmentId: idMap.get(p.segmentId) ?? p.segmentId }),
+        emitter.emit("transcript", {
+          ...p,
+          segmentId: idMap.get(p.segmentId) ?? p.segmentId,
+        }),
       );
       session.on("error", (e) => emitter.emit("error", e));
       await session.connect();
