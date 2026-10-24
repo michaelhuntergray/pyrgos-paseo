@@ -73,6 +73,13 @@ export interface SpeechStreamResult {
   format: string;
 }
 
+/** Per-request TTS controls; providers that do not support them ignore the argument. */
+export interface SpeechSynthesisOptions {
+  speed?: number;
+  pitch?: number;
+  emotion?: string;
+}
+
 export interface TextToSpeechProvider {
-  synthesizeSpeech(text: string): Promise<SpeechStreamResult>;
+  synthesizeSpeech(text: string, options?: SpeechSynthesisOptions): Promise<SpeechStreamResult>;
 }

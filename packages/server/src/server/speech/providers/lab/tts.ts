@@ -1,14 +1,34 @@
 import { PassThrough } from "node:stream";
 import type pino from "pino";
 import { WebSocket } from "ws";
-import type { SpeechStreamResult, TextToSpeechProvider } from "../../speech-provider.js";
-import { LAB_IDLE_TIMEOUT_MS, LAB_TTS_SAMPLE_RATE } from "./config.js";
+import type {
+  SpeechStreamResult,
+  SpeechSynthesisOptions,
+  TextToSpeechProvider,
+} from "../../speech-provider.js";
+import { LAB_IDLE_TIMEOUT_MS, LAB_TTS_MAX_SPEED, LAB_TTS_SAMPLE_RATE } from "./config.js";
 
 /** Per-request TTS controls. Omitted fields fall back to the configured defaults. */
-export interface LabSynthesisOptions {
-  speed?: number;
-  pitch?: number;
-  emotion?: string;
+export type LabSynthesisOptions = SpeechSynthesisOptions;
+
+/** Drops per-request values the lab would reject, so the configured default applies instead. */
+function sanitizeOverrides(overrides?: LabSynthesisOptions): LabSynthesisOptions {
+  const out: LabSynthesisOptions = {};
+  if (
+    typeof overrides?.speed === "number" &&
+    Number.isFinite(overrides.speed) &&
+    overrides.speed > 0 &&
+    overrides.speed <= LAB_TTS_MAX_SPEED
+  ) {
+    out.speed = overrides.speed;
+  }
+  if (typeof overrides?.pitch === "number" && Number.isFinite(overrides.pitch)) {
+    out.pitch = overrides.pitch;
+  }
+  if (typeof overrides?.emotion === "string" && overrides.emotion.trim()) {
+    out.emotion = overrides.emotion.trim();
+  }
+  return out;
 }
 
 export interface LabTtsOptions {
@@ -46,8 +66,9 @@ export class LabTTS implements TextToSpeechProvider {
 
   async synthesizeSpeech(
     text: string,
-    overrides?: LabSynthesisOptions,
+    rawOverrides?: LabSynthesisOptions,
   ): Promise<SpeechStreamResult> {
+    const overrides = sanitizeOverrides(rawOverrides);
     if (!text || text.trim().length === 0) {
       throw new Error("Cannot synthesize empty text");
     }
@@ -61,17 +82,13 @@ export class LabTTS implements TextToSpeechProvider {
         );
       }
       this.logger.warn({ err: error }, "Lab TTS unavailable; using fallback provider");
-      // Stock providers take only text and ignore the extra argument; a PC LabTTS honours it.
-      const next = this.options.fallback as TextToSpeechProvider & {
-        synthesizeSpeech(text: string, options?: LabSynthesisOptions): Promise<SpeechStreamResult>;
-      };
-      return next.synthesizeSpeech(text, overrides);
+      return this.options.fallback.synthesizeSpeech(text, overrides);
     }
   }
 
   private synthesizeFromLab(
     text: string,
-    overrides?: LabSynthesisOptions,
+    overrides: LabSynthesisOptions,
   ): Promise<SpeechStreamResult> {
     return new Promise((resolve, reject) => {
       const stream = new PassThrough();
@@ -106,9 +123,9 @@ export class LabTTS implements TextToSpeechProvider {
       };
 
       ws.on("open", () => {
-        const speed = overrides?.speed ?? this.options.speed;
-        const pitch = overrides?.pitch ?? this.options.pitch;
-        const emotion = overrides?.emotion ?? this.options.emotion;
+        const speed = overrides.speed ?? this.options.speed;
+        const pitch = overrides.pitch ?? this.options.pitch;
+        const emotion = overrides.emotion ?? this.options.emotion;
         ws.send(
           JSON.stringify({
             type: "speak",

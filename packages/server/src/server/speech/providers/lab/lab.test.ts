@@ -642,6 +642,41 @@ describe("TTS speed / pitch / emotion", () => {
     ]);
   });
 
+  test("per-request overrides work through the service from applyLabSpeechServices", async () => {
+    const received: unknown[] = [];
+    const url = await audioLab(received);
+    const { ttsService } = applyLabSpeechServices({
+      providers: {
+        dictationStt: { provider: "local", explicit: false, enabled: true },
+        voiceTurnDetection: { provider: "local", explicit: false, enabled: true },
+        voiceStt: { provider: "local", explicit: false, enabled: true },
+        voiceTts: { provider: "local", explicit: false, enabled: true },
+      },
+      existing: { ttsService: null, sttService: null } as never,
+      logger,
+      config: { ttsUrl: url, ttsVoice: "v", connectTimeoutMs: 500 },
+    });
+    await collect((await ttsService!.synthesizeSpeech("Hi", { speed: 1.5 })).stream);
+    expect(received).toEqual([{ type: "speak", text: "Hi", voice: "v", speed: 1.5 }]);
+  });
+
+  test("invalid per-request values are dropped, not sent", async () => {
+    const received: unknown[] = [];
+    const url = await audioLab(received);
+    const tts = new LabTTS(
+      { url, voice: "v", speed: 1.2, connectTimeoutMs: 500, fallback: null },
+      logger,
+    );
+    await collect((await tts.synthesizeSpeech("Hi", { speed: 0 })).stream);
+    await collect(
+      (await tts.synthesizeSpeech("Hi", { speed: Number.NaN, pitch: Infinity })).stream,
+    );
+    expect(received).toEqual([
+      { type: "speak", text: "Hi", voice: "v", speed: 1.2 },
+      { type: "speak", text: "Hi", voice: "v", speed: 1.2 },
+    ]);
+  });
+
   test("per-request options reach the PC tier when the lab is down", async () => {
     const received: unknown[] = [];
     const pcUrl = await audioLab(received);
@@ -701,6 +736,14 @@ describe("STT word timestamps", () => {
     expect(parseWords(undefined)).toBeUndefined();
     expect(parseWords("x")).toBeUndefined();
     expect(parseWords([{ word: 1 }])).toBeUndefined();
+  });
+
+  test("parseWords drops invalid timing and out-of-range probability", () => {
+    expect(parseWords([{ word: "hi", start: -1, end: -0.5, probability: 2 }])).toBeUndefined();
+    expect(parseWords([{ word: "hi", start: 1, end: 0.5 }])).toBeUndefined();
+    expect(parseWords([{ word: "hi", start: 0, end: 0.5, probability: 2 }])).toEqual([
+      { word: "hi", start: 0, end: 0.5 },
+    ]);
   });
 });
 
@@ -842,5 +885,74 @@ describe("PC local fallback (lab -> PC -> stock)", () => {
     await session.connect();
     session.commit();
     expect(transcripts).toEqual(["stock"]);
+  });
+});
+
+describe("review fixes", () => {
+  const providers = {
+    dictationStt: { provider: "local", explicit: false, enabled: true },
+    voiceTurnDetection: { provider: "local", explicit: false, enabled: true },
+    voiceStt: { provider: "local", explicit: false, enabled: true },
+    voiceTts: { provider: "local", explicit: false, enabled: true },
+  } as const;
+
+  test("overrides are reachable through the TextToSpeechProvider interface", async () => {
+    const received: unknown[] = [];
+    const url = await fakeLab((ws, data) => {
+      received.push(JSON.parse(data.toString()));
+      ws.send(Buffer.from([1, 0]));
+      ws.send(JSON.stringify({ type: "done" }));
+    });
+    const result = applyLabSpeechServices({
+      providers,
+      existing: {
+        turnDetectionService: null,
+        sttService: null,
+        ttsService: null,
+        dictationSttService: null,
+      },
+      logger,
+      config: { ttsUrl: url, ttsVoice: "v", connectTimeoutMs: 500 },
+    });
+    const service: TextToSpeechProvider = result.ttsService!;
+    await collect((await service.synthesizeSpeech("Hi", { speed: 1.5 })).stream);
+    expect(received).toEqual([{ type: "speak", text: "Hi", voice: "v", speed: 1.5 }]);
+  });
+
+  test("invalid per-request overrides are dropped, valid defaults kept", async () => {
+    const received: Array<Record<string, unknown>> = [];
+    const url = await fakeLab((ws, data) => {
+      received.push(JSON.parse(data.toString()));
+      ws.send(Buffer.from([1, 0]));
+      ws.send(JSON.stringify({ type: "done" }));
+    });
+    const tts = new LabTTS(
+      { url, voice: "v", speed: 1.1, connectTimeoutMs: 500, fallback: null },
+      logger,
+    );
+    for (const bad of [
+      { speed: 0 },
+      { speed: Number.NaN },
+      { speed: 99 },
+      { pitch: Number.POSITIVE_INFINITY },
+      { emotion: "  " },
+    ]) {
+      await collect((await tts.synthesizeSpeech("hi", bad)).stream);
+    }
+    for (const sent of received) {
+      expect(sent).toEqual({ type: "speak", text: "hi", voice: "v", speed: 1.1 });
+    }
+    expect(received).toHaveLength(5);
+  });
+
+  test("parseWords drops invalid timing and probability", () => {
+    expect(parseWords([{ word: "hi", start: -1, end: -0.5, probability: 2 }])).toBeUndefined();
+    expect(parseWords([{ word: "hi", start: 1, end: 0.5 }])).toBeUndefined();
+    expect(parseWords([{ word: "hi", start: 0, end: 0.5, probability: 2 }])).toEqual([
+      { word: "hi", start: 0, end: 0.5 },
+    ]);
+    expect(parseWords([{ word: "hi", start: 0, end: 0.5, probability: 0.5 }])).toEqual([
+      { word: "hi", start: 0, end: 0.5, probability: 0.5 },
+    ]);
   });
 });

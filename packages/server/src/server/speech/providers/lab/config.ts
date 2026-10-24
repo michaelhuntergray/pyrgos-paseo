@@ -1,5 +1,7 @@
 export const LAB_DEFAULT_TTS_VOICE = "profile:winner-r6-s49-heart-alice-bella";
 export const LAB_TTS_SAMPLE_RATE = 24000;
+/** Upper bound for the speech-rate multiplier, config and per-request alike. */
+export const LAB_TTS_MAX_SPEED = 4;
 export const LAB_STT_SAMPLE_RATE = 16000;
 export const LAB_CONNECT_TIMEOUT_MS = 1500;
 export const LAB_IDLE_TIMEOUT_MS = 3000;
@@ -34,7 +36,7 @@ export interface LabSpeechConfig {
  */
 function positiveNumber(raw: string | undefined): number | undefined {
   const n = raw?.trim() ? Number(raw) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  return Number.isFinite(n) && n > 0 && n <= LAB_TTS_MAX_SPEED ? n : undefined;
 }
 
 function finiteNumber(raw: string | undefined): number | undefined {

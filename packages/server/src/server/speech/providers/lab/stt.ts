@@ -16,7 +16,7 @@ export interface LabSttOptions {
   fallback: SpeechToTextProvider | null;
 }
 
-/** Keeps only well-formed {word,start,end} entries; undefined when none survive. */
+/** Keeps only well-formed {word,start,end} entries (0 <= start <= end; probability kept only in [0,1]); undefined when none survive. */
 export function parseWords(raw: unknown): WordTimestamp[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const words: WordTimestamp[] = [];
@@ -25,11 +25,14 @@ export function parseWords(raw: unknown): WordTimestamp[] | undefined {
     const { word, start, end, probability } = item as Record<string, unknown>;
     if (typeof word !== "string" || typeof start !== "number" || typeof end !== "number") continue;
     if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (start < 0 || end < start) continue;
     words.push({
       word,
       start,
       end,
-      ...(typeof probability === "number" ? { probability } : {}),
+      ...(typeof probability === "number" && probability >= 0 && probability <= 1
+        ? { probability }
+        : {}),
     });
   }
   return words.length > 0 ? words : undefined;

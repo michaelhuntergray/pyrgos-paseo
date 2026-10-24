@@ -23,7 +23,7 @@ Values are never committed. Set them in the daemon's environment.
 
 ## TTS speed, pitch and emotion
 
-Config sets the defaults; a per-request override wins: `lab.synthesizeSpeech(text, { speed, pitch, emotion })`. Only fields that are set go on the wire: `{"type":"speak","text","voice","speed"?,"pitch"?,"emotion"?}`. The stock `TextToSpeechProvider` interface is unchanged (the extra argument is optional on `LabTTS` and ignored by stock providers). Overrides are forwarded down the failover chain, so the PC tier honours them too.
+Config sets the defaults; a per-request override wins: `lab.synthesizeSpeech(text, { speed, pitch, emotion })`. Only fields that are set go on the wire: `{"type":"speak","text","voice","speed"?,"pitch"?,"emotion"?}`. `TextToSpeechProvider.synthesizeSpeech` takes an optional second `SpeechSynthesisOptions` argument, so overrides work through the service the runtime returns; stock providers ignore it. Validation is the same for config and overrides: `speed` finite, > 0 and <= 4; `pitch` finite; `emotion` non-blank. Invalid per-request values are dropped (the default applies), never sent. Overrides are forwarded down the failover chain, so the PC tier honours them too.
 
 Backend support today (lab `tts_server.py`, Kokoro):
 
