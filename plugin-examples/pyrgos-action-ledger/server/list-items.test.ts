@@ -54,10 +54,14 @@ describe("listActionItems read errors", () => {
     await expect(listActionItems()).rejects.toMatchObject({ code: "EISDIR" });
   });
 
-  it("surfaces ENOTDIR instead of treating it as an empty ledger", async () => {
-    const plain = join(dir, "plain");
-    await writeFile(plain, "x");
-    process.env.PYRGOS_LEDGER_FILE = join(plain, "child.ledger.jsonl");
-    await expect(listActionItems()).rejects.toMatchObject({ code: "ENOTDIR" });
-  });
+  // Windows reports ENOENT when a path descends through a regular file.
+  it.skipIf(process.platform === "win32")(
+    "surfaces ENOTDIR instead of treating it as an empty ledger",
+    async () => {
+      const plain = join(dir, "plain");
+      await writeFile(plain, "x");
+      process.env.PYRGOS_LEDGER_FILE = join(plain, "child.ledger.jsonl");
+      await expect(listActionItems()).rejects.toMatchObject({ code: "ENOTDIR" });
+    },
+  );
 });
