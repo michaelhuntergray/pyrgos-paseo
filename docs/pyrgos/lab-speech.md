@@ -29,7 +29,7 @@ Backend support today (lab `tts_server.py`, Kokoro):
 
 | Option    | Lab backend                                                                                                                        |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `speed`   | **Not read yet.** The server hardcodes `speed=1.0`; Kokoro supports it, so reading `req.get("speed")` is a one-line server change. |
+| `speed`   | **Supported** (voice-agent MIC-757). The server passes a finite `0 < speed <= 4` to Kokoro and uses 1.0 for anything else; 1.5 gave a clip about 1.5x shorter. |
 | `pitch`   | **Unsupported.** Kokoro has no pitch control. The field is sent and ignored; nothing is faked client-side.                         |
 | `emotion` | **Unsupported.** Kokoro has no emotion control. Sent and ignored, as above.                                                        |
 
@@ -37,7 +37,7 @@ Backend support today (lab `tts_server.py`, Kokoro):
 
 `StreamingTranscriptionEvent` has an optional `words: { word, start, end, probability? }[]` (seconds from utterance start). The lab STT session fills it when a `partial` or `final` message carries a `words` array; malformed entries are dropped and the field is omitted when none are valid. Stock providers never set it.
 
-Backend support today: **the lab STT server does not emit words** (`stt_server.py` runs faster-whisper with `without_timestamps=True`; switching to `word_timestamps=True` and adding `words` to the `final` message is the server-side change). **TTS alignment is unsupported**: the TTS server returns only PCM and `done`, so no alignment type exists in the provider results.
+Backend support today: **the lab STT server emits words on `final` messages** (voice-agent MIC-757: faster-whisper `word_timestamps=True`, about +14 ms on a 3 to 4 s utterance; `STT_WORDS=0` on the server turns it off). Partials carry no words. **TTS alignment is unsupported**: the TTS server returns only PCM and `done`, so no alignment type exists in the provider results.
 
 ## Wire protocol
 
