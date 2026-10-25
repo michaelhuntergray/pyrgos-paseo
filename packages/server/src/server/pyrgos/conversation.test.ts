@@ -302,9 +302,22 @@ describe("conversation: overseer replies reach the voice", () => {
     await conversation.close();
   });
 
+  it("holds a reply after the first transcript, whose VAD events the conversation never saw", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("first");
+    await conversation.handleTranscript("hello");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(speakReply).not.toHaveBeenCalled();
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["first"]);
+    await conversation.close();
+  });
+
   it("does not speak a reply while a turn is running", async () => {
     const speakReply = vi.fn(async () => true);
     let release: (() => void) | undefined;
+    let now = 0;
     const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
     const conversation = await createPyrgosConversation({
       env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
@@ -313,7 +326,7 @@ describe("conversation: overseer replies reach the voice", () => {
       announce: async () => {},
       sessionId: "voice-busy",
       speakReply,
-      clock: () => 0,
+      clock: () => now,
       replyPollMs: 0,
       brainFactory: () => ({
         async *runTurn(): AsyncGenerator<BrainEvent> {
@@ -332,6 +345,7 @@ describe("conversation: overseer replies reach the voice", () => {
     );
     const turn = conversation.handleTranscript("what is running");
     await vi.waitFor(() => expect(release).toBeDefined());
+    now += HOLD_SECONDS * 1000; // a long turn: the hold after the transcript has passed
     expect(await conversation.pumpReplies()).toEqual([]);
     expect(speakReply).not.toHaveBeenCalled();
     release?.();

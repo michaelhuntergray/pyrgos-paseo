@@ -330,7 +330,9 @@ it so one reply cannot block the queue (MIC-753 A; this replaces the earlier ack
 before it was heard). Wiring: the voice session hands its conversation a `speak` port (`VoiceConversationIO`) that queues behind
 other speech and resolves heard/cut off; `createPyrgosConversation` runs the `ReplyPump` on it, polling every `REPLY_POLL_MS` (2 s) and
 at each turn end. The gate is busy (`llm`) while a turn runs and (`user`) from speech start until the VAD stop or a
-transcript, then holds for `HOLD_SECONDS`. Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
+transcript, then holds for `HOLD_SECONDS`; every transcript starts the hold, since the conversation misses
+the first utterance's VAD events. A reply already queued when the user starts talking is dropped (not heard)
+and retried. Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
 repeat). A crash mid-sentence drops the unspoken remainder of that one reply,
 which is the deliberate choice over repeating it. Replies that arrive while voice mode is off (`isVoiceMode` false) stay unacked in the
 file and are spoken at the next turn boundary after voice mode turns on, including after a restart. If the file shrinks or is replaced

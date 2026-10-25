@@ -327,9 +327,13 @@ describe("VoiceSession conversation", () => {
 
     // Cut off: the user starts talking before the client confirms playback.
     const cut = speak("The overseer says: tests green");
+    // Queued behind it: never starts once the user has started talking.
+    const queued = speak("The overseer says: deploy done");
     await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(2));
     detector.emit("speech_started");
     expect(await cut).toBe(false);
+    expect(await queued).toBe(false);
+    expect(host.emitted.filter(isAudioOutput)).toHaveLength(2);
     await voiceSession.cleanup();
   });
 
