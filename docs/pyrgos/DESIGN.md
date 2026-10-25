@@ -6,11 +6,11 @@ and `docs/pyrgos/`. Config comes from env vars; names only, never values.
 
 ## 1. Decision summary
 
-| Piece | Where it lives | How it plugs in |
-|---|---|---|
-| B conversation agent | `packages/server/src/server/pyrgos/conversation-agent/` | One optional "voice brain" hook on `VoiceSession` (core change 2). Falls back to stock voice mode when unset. |
-| C ledger + feed | `packages/server/src/server/pyrgos/ledger/` (pure), `packages/server/src/server/pyrgos/feed/` (I/O), UI in `plugins/pyrgos-ledger/` | Ledger is a pure module; B owns the instance; the UI is a normal plugin (`docs/plugins.md:565` file panels, `:530` sidebar items). |
-| D lab speech | `packages/server/src/server/pyrgos/speech/` | New provider id `lab` in the closed enum (core change 1). |
+| Piece                | Where it lives                                                                                                                      | How it plugs in                                                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| B conversation agent | `packages/server/src/server/pyrgos/conversation-agent/`                                                                             | One optional "voice brain" hook on `VoiceSession` (core change 2). Falls back to stock voice mode when unset.                      |
+| C ledger + feed      | `packages/server/src/server/pyrgos/ledger/` (pure), `packages/server/src/server/pyrgos/feed/` (I/O), UI in `plugins/pyrgos-ledger/` | Ledger is a pure module; B owns the instance; the UI is a normal plugin (`docs/plugins.md:565` file panels, `:530` sidebar items). |
+| D lab speech         | `packages/server/src/server/pyrgos/speech/`                                                                                         | New provider id `lab` in the closed enum (core change 1).                                                                          |
 
 Rule: B imports C and D only through the interfaces in section 4. C and D never import B.
 
@@ -38,8 +38,13 @@ We add no wire events in v1 (see section 6).
 Speech provider interfaces (`packages/server/src/server/speech/speech-provider.ts`):
 
 ```ts
-interface SpeechToTextProvider { id: string; createSession(p: { logger; language?; prompt? }): StreamingTranscriptionSession } // PCM16LE in; committed/transcript/error out
-interface TextToSpeechProvider { synthesizeSpeech(text: string): Promise<{ stream: Readable; format: string }> }
+interface SpeechToTextProvider {
+  id: string;
+  createSession(p: { logger; language?; prompt? }): StreamingTranscriptionSession;
+} // PCM16LE in; committed/transcript/error out
+interface TextToSpeechProvider {
+  synthesizeSpeech(text: string): Promise<{ stream: Readable; format: string }>;
+}
 ```
 
 Resolution: `speech/speech-runtime.ts:50-60` defaults all four roles (`dictationStt`, `voiceTurnDetection`, `voiceStt`, `voiceTts`) to `local`;
@@ -57,13 +62,13 @@ Agent launch: `PaseoApi.agents.create(options): Promise<PaseoAgentHandle>` (`pac
 
 ## 3. Core changes (the whole list; each is small)
 
-| # | File | Change | Why unavoidable |
-|---|---|---|---|
-| 1 | `packages/server/src/server/speech/speech-types.ts` | Add `"lab"` to `SpeechProviderIdSchema`. | The enum is closed; config parsing rejects unknown ids. |
-| 1b | `packages/server/src/server/speech/speech-runtime.ts` | In the provider build step, when a role resolves to `lab`, call `createLabSpeech(config)` from `pyrgos/speech`. Default for `voiceTts` and `voiceStt` becomes `lab` only when `PYRGOS_LAB_TTS_URL` / `PYRGOS_LAB_STT_URL` is set; else stays `local` (stock fallback). | Providers are constructed in this one function; no registry exists. |
-| 2 | `packages/server/src/server/session/voice/voice-session.ts` (+ `index.ts` options type) | Add optional `VoiceBrain` to `VoiceSessionOptions`. In `handleTranscriptionResultPayload`, if a brain is set, call `brain.onUtterance(text, ctx)` instead of requiring a bound agent and `host.sendSpokenInput`. Abort calls `brain.cancel()`. Wire `speak` through the existing `ttsManager` path so playback acks, abort and `activity_log` behave identically. | The seam today only forwards text to a Paseo agent whose reply costs a full agent turn and an MCP `speak` call; sub-2 s replies need a direct call. |
-| 3 | `packages/server/src/server/session.ts` (near `:1250`) | Construct the brain from `pyrgos/conversation-agent` when `PYRGOS_VOICE=1` and pass it in the options. | Session assembly is the only place that knows the host callbacks. |
-| 4 | `packages/server/src/server/bootstrap.ts` (or the file that builds `PluginServerContext`; B/C confirm the exact name) | Expose the ledger and feed to the ledger plugin through a handler context field, or run the plugin RPC against a module singleton. | Plugin handlers only receive `paseo`; they need ledger reads. Preferred: the ledger plugin's `index.server.ts` imports `pyrgos/ledger` through the plugin-local copy (no core change) and reads the same JSONL file. Only add this change if that proves racy. |
+| #   | File                                                                                                                  | Change                                                                                                                                                                                                                                                                                                                                                            | Why unavoidable                                                                                                                                                                                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `packages/server/src/server/speech/speech-types.ts`                                                                   | Add `"lab"` to `SpeechProviderIdSchema`.                                                                                                                                                                                                                                                                                                                          | The enum is closed; config parsing rejects unknown ids.                                                                                                                                                                                                        |
+| 1b  | `packages/server/src/server/speech/speech-runtime.ts`                                                                 | In the provider build step, when a role resolves to `lab`, call `createLabSpeech(config)` from `pyrgos/speech`. Default for `voiceTts` and `voiceStt` becomes `lab` only when `PYRGOS_LAB_TTS_URL` / `PYRGOS_LAB_STT_URL` is set; else stays `local` (stock fallback).                                                                                            | Providers are constructed in this one function; no registry exists.                                                                                                                                                                                            |
+| 2   | `packages/server/src/server/session/voice/voice-session.ts` (+ `index.ts` options type)                               | Add optional `VoiceBrain` to `VoiceSessionOptions`. In `handleTranscriptionResultPayload`, if a brain is set, call `brain.onUtterance(text, ctx)` instead of requiring a bound agent and `host.sendSpokenInput`. Abort calls `brain.cancel()`. Wire `speak` through the existing `ttsManager` path so playback acks, abort and `activity_log` behave identically. | The seam today only forwards text to a Paseo agent whose reply costs a full agent turn and an MCP `speak` call; sub-2 s replies need a direct call.                                                                                                            |
+| 3   | `packages/server/src/server/session.ts` (near `:1250`)                                                                | Construct the brain from `pyrgos/conversation-agent` when `PYRGOS_VOICE=1` and pass it in the options.                                                                                                                                                                                                                                                            | Session assembly is the only place that knows the host callbacks.                                                                                                                                                                                              |
+| 4   | `packages/server/src/server/bootstrap.ts` (or the file that builds `PluginServerContext`; B/C confirm the exact name) | Expose the ledger and feed to the ledger plugin through a handler context field, or run the plugin RPC against a module singleton.                                                                                                                                                                                                                                | Plugin handlers only receive `paseo`; they need ledger reads. Preferred: the ledger plugin's `index.server.ts` imports `pyrgos/ledger` through the plugin-local copy (no core change) and reads the same JSONL file. Only add this change if that proves racy. |
 
 Everything else is additive under `pyrgos/`, `plugins/pyrgos-ledger/` and `docs/pyrgos/`. Upstream merge surface: three small edits
 plus one optional.
@@ -73,17 +78,18 @@ plus one optional.
 ```ts
 export interface VoiceBrainContext {
   speak(sentence: string, signal: AbortSignal): Promise<void>; // = ttsManager.generateAndWaitForPlayback(...), emits activity_log
-  signal: AbortSignal;                                         // per-utterance: aborted by abort_request or a new user utterance
+  signal: AbortSignal; // per-utterance: aborted by abort_request or a new user utterance
 }
-export interface VoiceBrainEvents {                            // push events; VoiceSession calls these, the brain never polls
-  onUserSpeechStarted(): void;                                 // from callbacks.onSpeechStarted (voice-session.ts:~590), before STT finishes
-  onUserSpeechEnded(): void;                                   // from the voice_input_state isSpeaking=false emit (:677)
-  onPlaybackStarted(): void;                                   // first audio_output of a TTS request
-  onPlaybackComplete(): void;                                  // last audio_played ack, or abort/cancel (handleAudioPlayed :1142, handleAbort :1097)
+export interface VoiceBrainEvents {
+  // push events; VoiceSession calls these, the brain never polls
+  onUserSpeechStarted(): void; // from callbacks.onSpeechStarted (voice-session.ts:~590), before STT finishes
+  onUserSpeechEnded(): void; // from the voice_input_state isSpeaking=false emit (:677)
+  onPlaybackStarted(): void; // first audio_output of a TTS request
+  onPlaybackComplete(): void; // last audio_played ack, or abort/cancel (handleAudioPlayed :1142, handleAbort :1097)
 }
 export interface VoiceBrain extends VoiceBrainEvents {
   onUtterance(text: string, ctx: VoiceBrainContext): Promise<void>; // resolves when the turn is spoken
-  speakStanding(text: string): Promise<void>;                  // out-of-turn speech (overseer replies); VoiceSession mints a fresh signal
+  speakStanding(text: string): Promise<void>; // out-of-turn speech (overseer replies); VoiceSession mints a fresh signal
   cancel(): void;
   dispose(): void;
 }
@@ -112,26 +118,35 @@ session, `handleSetVoiceMode(true, agentId?)`:
 ```ts
 export type ItemState = "draft" | "refined" | "agreed" | "dropped";
 export interface ActionItem {
-  id: string;            // ulid; stable
-  text: string;          // one line, <= 400 chars
+  id: string; // ulid; stable
+  text: string; // one line, <= 400 chars
   state: ItemState;
-  createdAt: string;     // ISO; injected clock
+  createdAt: string; // ISO; injected clock
   updatedAt: string;
   transcriptRef: string; // "<session-file>#<line>" from the feed
   route: "paseo" | "dispatch"; // set at propose, immutable (section 4.4)
   ticketId?: string;
-  launch?: { status: "launching" | "launched" | "failed"; agentId?: string; lane?: string; reason?: string } | null;
+  launch?: {
+    status: "launching" | "launched" | "failed";
+    agentId?: string;
+    lane?: string;
+    reason?: string;
+  } | null;
 }
 export interface Ledger {
   list(filter?: { state?: ItemState }): ActionItem[];
-  propose(text: string, transcriptRef: string, opts?: { ticketId?: string; route?: "paseo" | "dispatch" }): ActionItem; // -> draft
-  refine(id: string, text: string): ActionItem;                             // draft|refined -> refined
+  propose(
+    text: string,
+    transcriptRef: string,
+    opts?: { ticketId?: string; route?: "paseo" | "dispatch" },
+  ): ActionItem; // -> draft
+  refine(id: string, text: string): ActionItem; // draft|refined -> refined
   agree(id: string, evidence: { transcriptRef: string; phrase: string }): ActionItem; // refined -> agreed
-  drop(id: string): ActionItem;                                             // any non-agreed -> dropped
-  beginLaunch(id: string, route: "paseo" | "dispatch"): ActionItem;        // agreed only; throws if launching/launched (the lock)
+  drop(id: string): ActionItem; // any non-agreed -> dropped
+  beginLaunch(id: string, route: "paseo" | "dispatch"): ActionItem; // agreed only; throws if launching/launched (the lock)
   markLaunched(id: string, launch: { agentId: string; lane: string }): ActionItem;
   failLaunch(id: string, reason: string): ActionItem;
-  clearLaunch(id: string): ActionItem;                                      // after a spoken "retry"
+  clearLaunch(id: string): ActionItem; // after a spoken "retry"
   subscribe(fn: (items: ActionItem[]) => void): () => void;
 }
 export function createLedger(opts: { path: string; clock?: () => Date; id?: () => string }): Ledger;
@@ -150,9 +165,9 @@ the user's actual transcript line, so agreement cannot come from the model alone
 ```ts
 export function createConversationAgent(deps: {
   ledger: Ledger;
-  feed: Feed;                 // 4.3
-  launcher: AgentLauncher;    // 4.4
-  llm: ChatBrain;             // Claude via subscription, see below
+  feed: Feed; // 4.3
+  launcher: AgentLauncher; // 4.4
+  llm: ChatBrain; // Claude via subscription, see below
   logger: Logger;
 }): VoiceBrain;
 ```
@@ -174,7 +189,10 @@ export function createConversationAgent(deps: {
 
 ```ts
 export interface Feed {
-  append(speaker: "user" | "assistant" | "overseer" | "system" | "action", text: string): { line: number; ref: string };
+  append(
+    speaker: "user" | "assistant" | "overseer" | "system" | "action",
+    text: string,
+  ): { line: number; ref: string };
   announce(item: ActionItem): { ok: boolean; via: "surface" | "inbox"; line: string };
   watchReplies(onReply: (reply: { seq: number; ts: string; text: string }) => void): () => void;
   ackReply(seq: number): void; // durable: advances ackedSeq in replies.cursor.json (atomic temp+rename) before returning
@@ -228,8 +246,15 @@ Guardrail: `launch` refuses any item whose state is not `agreed` or whose agreem
 `packages/server/src/server/pyrgos/speech/index.ts`:
 
 ```ts
-export function createLabSpeech(cfg: LabSpeechConfig): { tts?: TextToSpeechProvider; stt?: SpeechToTextProvider };
-export interface LabSpeechConfig { ttsUrl?: string; sttUrl?: string; voice: string }
+export function createLabSpeech(cfg: LabSpeechConfig): {
+  tts?: TextToSpeechProvider;
+  stt?: SpeechToTextProvider;
+};
+export interface LabSpeechConfig {
+  ttsUrl?: string;
+  sttUrl?: string;
+  voice: string;
+}
 ```
 
 Each role is independent: `tts` is built only when `ttsUrl` is set, `stt` only when `sttUrl` is set, and the other is `undefined`.
@@ -298,9 +323,12 @@ session's own (`this.abortController`, as `registerVoiceBridgeForAgent` does at 
 delivery uses a persisted cursor, not memory, and the replies file itself is the durable queue (no second pending file). C stores
 `{epoch, ackedSeq}` in `replies.cursor.json` beside it. On start and on every poll `watchReplies` delivers each line with
 `seq > ackedSeq` that it has not already delivered this process, in order; B queues them in memory. Replies are spoken in `seq` order, so
-`ackedSeq` is a high-water mark. B calls `feed.ackReply(seq)` at the moment that reply's playback *starts* (`onPlaybackStarted` for the
-`speakStanding` call), before speech finishes. Contract: a reply not yet started is redelivered after a crash or restart (no loss);
-a reply whose playback started is never redelivered (no repeat). A crash mid-sentence drops the unspoken remainder of that one reply,
+`ackedSeq` is a high-water mark. A reply is acked on _audible completion_: `ttsManager.generateAndWaitForPlayback` resolves `true` only
+when the client confirmed every chunk played (`audio_played`), and `false` when a barge-in or abort cut it off. `ReplyPump` keeps an
+interrupted reply at the head of its queue and re-speaks it at the next turn boundary, up to `MAX_REPLY_ATTEMPTS` (3) tries, then drops
+it so one reply cannot block the queue (MIC-753 A; this replaces the earlier ack at first `audio_output`, which lost a reply cut off
+before it was heard). Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
+repeat). A crash mid-sentence drops the unspoken remainder of that one reply,
 which is the deliberate choice over repeating it. Replies that arrive while voice mode is off (`isVoiceMode` false) stay unacked in the
 file and are spoken at the next turn boundary after voice mode turns on, including after a restart. If the file shrinks or is replaced
 (size below the offset, or inode change) C bumps `epoch`, resets `ackedSeq` to 0 and re-reads from the start.

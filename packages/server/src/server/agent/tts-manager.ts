@@ -145,14 +145,15 @@ export class TTSManager {
 
   /**
    * Generate TTS audio, emit to client, and wait for playback confirmation
-   * Returns a Promise that resolves when the client confirms playback completed
+   * Resolves true once the client confirms every segment played to the end, or false when aborted
+   * first, so callers can tell a reply the user heard from one cut off mid-playback.
    */
   public async generateAndWaitForPlayback(
     text: string,
     emitMessage: (msg: SessionOutboundMessage) => void,
     abortSignal: AbortSignal,
     isVoiceMode: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const ttsStartMs = Date.now();
     this.logger.info(
       {
@@ -193,7 +194,7 @@ export class TTSManager {
       for (const segment of segments) {
         if (abortSignal.aborted) {
           this.logger.debug("Aborted before emitting segmented audio");
-          return;
+          return false;
         }
 
         const synthWaitStart = Date.now();
@@ -203,7 +204,7 @@ export class TTSManager {
         scheduleNextSegments();
 
         if (result.kind === "aborted") {
-          return;
+          return false;
         }
 
         if (result.kind === "error") {
@@ -221,12 +222,15 @@ export class TTSManager {
         );
 
         const emitStart = Date.now();
-        await this.emitPreparedSegment({
+        const heard = await this.emitPreparedSegment({
           prepared: result.prepared,
           emitMessage,
           abortSignal,
           isVoiceMode,
         });
+        if (!heard) {
+          return false;
+        }
         this.logger.info(
           {
             segmentIndex: segment.index,
@@ -238,6 +242,7 @@ export class TTSManager {
 
         scheduleNextSegments();
       }
+      return true;
     } finally {
       this.cleanupPrefetchedSegments(inflight);
       this.logger.info(
@@ -347,7 +352,7 @@ export class TTSManager {
     emitMessage: (msg: SessionOutboundMessage) => void;
     abortSignal: AbortSignal;
     isVoiceMode: boolean;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { prepared, emitMessage, abortSignal, isVoiceMode } = params;
     const { stream, format, text } = prepared;
 
@@ -437,10 +442,11 @@ export class TTSManager {
     }
 
     if (abortSignal.aborted) {
-      return;
+      return false;
     }
 
     this.logger.debug({ audioId, textLength: text.length }, "Audio playback confirmed");
+    return true;
   }
 
   /**

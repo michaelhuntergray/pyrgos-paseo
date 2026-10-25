@@ -6,6 +6,7 @@ import {
   announceLine,
   createAnnouncer,
   createVoiceSession,
+  MAX_REPLY_ATTEMPTS,
   ReplyPump,
   ReplyWatcher,
   TurnGate,
@@ -279,5 +280,54 @@ describe("ReplyPump", () => {
     expect(speak).toHaveBeenCalledTimes(2);
     const log = await readFile(session.path, "utf8");
     expect(log.split("\n").filter((line) => line.includes("retry me"))).toHaveLength(1);
+  });
+
+  it("re-speaks a reply interrupted before it was heard, at the next turn boundary", async () => {
+    const session = createVoiceSession({ dir, session: "s7" });
+    await appendFile(
+      session.repliesPath,
+      `${JSON.stringify({ text: "cut off" })}\n${JSON.stringify({ text: "after" })}\n`,
+    );
+    const speak = vi
+      .fn<(line: string) => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(),
+      session,
+      speak,
+    });
+    // Interrupted: nothing is acked and the pump waits for the next boundary instead of talking over the user.
+    expect(await pump.pump()).toEqual([]);
+    expect(speak).toHaveBeenCalledTimes(1);
+    expect(await pump.pump()).toEqual(["cut off", "after"]);
+    expect(speak.mock.calls.map(([line]) => line)).toEqual([
+      "The overseer says: cut off",
+      "The overseer says: cut off",
+      "The overseer says: after",
+    ]);
+    const log = await readFile(session.path, "utf8");
+    expect(log.split("\n").filter((line) => line.includes("cut off"))).toHaveLength(1);
+  });
+
+  it("gives up on a reply after the retry window so one reply cannot block the queue", async () => {
+    const session = createVoiceSession({ dir, session: "s8" });
+    await appendFile(
+      session.repliesPath,
+      `${JSON.stringify({ text: "never heard" })}\n${JSON.stringify({ text: "next" })}\n`,
+    );
+    const speak = vi.fn(async (line: string) => !line.includes("never heard"));
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(),
+      session,
+      speak,
+    });
+    for (let attempt = 1; attempt < MAX_REPLY_ATTEMPTS; attempt += 1) {
+      expect(await pump.pump()).toEqual([]);
+    }
+    expect(await pump.pump()).toEqual(["next"]);
+    expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS + 1);
   });
 });
