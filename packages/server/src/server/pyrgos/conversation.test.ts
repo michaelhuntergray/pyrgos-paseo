@@ -317,6 +317,48 @@ describe("conversation: overseer replies reach the voice", () => {
     await conversation.close();
   });
 
+  it("stays busy while a newer turn runs after an older one finishes late", async () => {
+    const speakReply = vi.fn(async () => true);
+    const releases: (() => void)[] = [];
+    const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
+    let now = 0;
+    const conversation = await createPyrgosConversation({
+      env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
+      onEvent: () => {},
+      launch: vi.fn(async () => {}),
+      announce: async () => {},
+      sessionId: "voice-overlap",
+      speakReply,
+      clock: () => now,
+      replyPollMs: 0,
+      brainFactory: () => ({
+        async *runTurn(): AsyncGenerator<BrainEvent> {
+          await new Promise<void>((r) => releases.push(r));
+          yield { type: "text", text: "Okay." };
+        },
+        async interrupt() {}, // the old turn ignores the interrupt and ends later
+        async close() {},
+      }),
+    });
+    appendFileSync(
+      join(root, ".agents/feedback/voice/voice-overlap.replies.jsonl"),
+      `${JSON.stringify({ text: "late" })}\n`,
+    );
+    const first = conversation.handleTranscript("one");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const second = conversation.handleTranscript("two");
+    // The agent abandons the stuck turn after its interrupt timeout and starts the new one.
+    await vi.waitFor(() => expect(releases).toHaveLength(2), { timeout: 5000 });
+    releases[0]!();
+    await first;
+    now += HOLD_SECONDS * 1000;
+    expect(await conversation.pumpReplies()).toEqual([]);
+    releases[1]!();
+    await second;
+    await vi.waitFor(() => expect(speakReply).toHaveBeenCalledTimes(1));
+    await conversation.close();
+  });
+
   it("does not speak a reply while a turn is running", async () => {
     const speakReply = vi.fn(async () => true);
     let release: (() => void) | undefined;

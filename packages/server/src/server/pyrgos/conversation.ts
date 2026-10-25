@@ -147,12 +147,16 @@ export async function createPyrgosConversation(
     gate.hold();
   }
 
+  // Counted, not a boolean, so an abandoned turn settling late cannot clear a newer turn's flag.
+  let runningTurns = 0;
   async function runTurn(text: string): Promise<void> {
+    runningTurns += 1;
     gate.set("llm", true);
     try {
       await agent.handleTranscript(text);
     } finally {
-      gate.set("llm", false);
+      runningTurns -= 1;
+      gate.set("llm", runningTurns > 0);
     }
     // A turn boundary: let a waiting overseer reply in.
     void pumpReplies();
