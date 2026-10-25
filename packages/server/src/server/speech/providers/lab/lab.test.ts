@@ -478,6 +478,127 @@ describe("LabSTT", () => {
     expect(errors).toEqual([]);
   });
 
+  function recordingFallback() {
+    const calls: string[] = [];
+    const bus = new EventEmitter();
+    let n = 0;
+    const delegate = {
+      requiredSampleRate: 16000,
+      connect: async () => {},
+      appendPcm16: (c: Buffer) => calls.push(`append${c[0]}`),
+      commit: () => {
+        calls.push("commit");
+        n += 1;
+        bus.emit("committed", {
+          segmentId: `fb-${n}`,
+          previousSegmentId: null,
+        });
+        bus.emit("transcript", {
+          segmentId: `fb-${n}`,
+          transcript: `t${n}`,
+          isFinal: true,
+        });
+      },
+      clear: () => {},
+      close: () => {},
+      on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
+    };
+    const fallback = {
+      createSession: () => delegate,
+    } as unknown as SpeechToTextProvider;
+    return { calls, fallback };
+  }
+
+  test("committed utterances whose final never arrived are replayed in order with their ids", async () => {
+    const { calls, fallback } = recordingFallback();
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([3, 0]));
+    await expect.poll(() => frames).toBe(5);
+    expect(new Set(committed).size).toBe(2);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(5);
+    expect(calls).toEqual(["append1", "commit", "append2", "commit", "append3"]);
+    // The replayed commits keep the ids already announced for them.
+    expect(finals).toEqual(committed);
+  });
+
+  test("lab finals are matched to committed utterances in order", async () => {
+    const ends: WebSocket[] = [];
+    const url = await fakeLab((ws, _data, isBinary) => {
+      if (!isBinary) ends.push(ws);
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback: null }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => e.isFinal && finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    await expect.poll(() => ends.length).toBe(2);
+    ends[0]!.send(JSON.stringify({ type: "final", text: "one" }));
+    ends[1]!.send(JSON.stringify({ type: "final", text: "two" }));
+    await expect.poll(() => finals.length).toBe(2);
+    expect(finals).toEqual(committed);
+    session.close();
+  });
+
+  test("a finalized utterance is not replayed after a later socket loss", async () => {
+    const { calls, fallback } = recordingFallback();
+    const url = await fakeLab((ws, _data, isBinary) => {
+      if (!isBinary) ws.send(JSON.stringify({ type: "final", text: "done" }));
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const finals: string[] = [];
+    session.on("transcript", (e) => finals.push(e.transcript));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    await expect.poll(() => finals).toEqual(["done"]);
+    session.appendPcm16(Buffer.from([2, 0]));
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(1);
+    expect(calls).toEqual(["append2"]);
+  });
+
+  test("replay buffer is bounded: the oldest committed audio is dropped first", async () => {
+    const { calls, fallback } = recordingFallback();
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback, replayMaxBytes: 4 }, logger);
+    const session = stt.createSession({ logger });
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0, 1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([3, 0]));
+    await expect.poll(() => frames).toBe(5);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(3);
+    expect(calls).toEqual(["append2", "commit", "append3"]);
+  });
+
   test("a failed clear() replacement socket falls back instead of stranding audio", async () => {
     const calls: string[] = [];
     const delegate = {
@@ -648,7 +769,11 @@ describe("TTS speed / pitch / emotion", () => {
     const { ttsService } = applyLabSpeechServices({
       providers: {
         dictationStt: { provider: "local", explicit: false, enabled: true },
-        voiceTurnDetection: { provider: "local", explicit: false, enabled: true },
+        voiceTurnDetection: {
+          provider: "local",
+          explicit: false,
+          enabled: true,
+        },
         voiceStt: { provider: "local", explicit: false, enabled: true },
         voiceTts: { provider: "local", explicit: false, enabled: true },
       },
@@ -940,7 +1065,12 @@ describe("review fixes", () => {
       await collect((await tts.synthesizeSpeech("hi", bad)).stream);
     }
     for (const sent of received) {
-      expect(sent).toEqual({ type: "speak", text: "hi", voice: "v", speed: 1.1 });
+      expect(sent).toEqual({
+        type: "speak",
+        text: "hi",
+        voice: "v",
+        speed: 1.1,
+      });
     }
     expect(received).toHaveLength(5);
   });

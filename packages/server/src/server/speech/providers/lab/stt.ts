@@ -14,6 +14,20 @@ export interface LabSttOptions {
   connectTimeoutMs: number;
   /** Used when the lab cannot be reached at connect(). */
   fallback: SpeechToTextProvider | null;
+  /** Cap on audio kept for fallback replay (committed-but-unfinalized plus current); default 60 s. */
+  replayMaxBytes?: number;
+}
+
+/** 60 s of 16 kHz mono int16 PCM. */
+const DEFAULT_REPLAY_MAX_BYTES = LAB_STT_SAMPLE_RATE * 2 * 60;
+
+/** An utterance committed to the lab whose final transcript has not arrived yet. */
+interface CommittedUtterance {
+  segmentId: string;
+  chunks: Buffer[];
+  bytes: number;
+  /** Audio evicted by the replay cap; the lab may still answer it, the fallback cannot. */
+  dropped: boolean;
 }
 
 /** Keeps only well-formed {word,start,end} entries (0 <= start <= end; probability kept only in [0,1]); undefined when none survive. */
@@ -84,20 +98,56 @@ export class LabSTT implements SpeechToTextProvider {
     let delegate: StreamingTranscriptionSession | null = null;
     let segmentId = randomUUID();
     let previousSegmentId: string | null = null;
-    const queued: Buffer[] = [];
+    // Frames waiting for the socket, in order; null is a commit's "end".
+    const queued: Array<Buffer | null> = [];
     let closed = false;
-    // commit() before the socket is (re)connected: the "end" goes out right after the queued audio.
-    let endPending = false;
     let pending: WebSocket | null = null;
     // Latest lab open attempt; connect() follows it when clear() aborts the one it started with.
     let latest: Promise<void> | null = null;
     let connecting = false;
-    let replayingCommit = false;
-    // Audio of the current utterance already sent to the lab, and whether it was committed:
-    // replayed to the fallback if the lab dies before its final.
-    const utterance: Buffer[] = [];
-    let commitSent = false;
+    // Audio the lab has not finalized, replayed to the fallback if it dies first: every committed
+    // utterance awaiting its final (oldest first; the lab answers in order) plus the current,
+    // uncommitted one. Bounded by replayMaxBytes; the oldest committed audio is evicted first.
+    // Limit: an evicted utterance (and any audio the fallback never saw) gets no fallback transcript.
+    const replayMaxBytes = options.replayMaxBytes ?? DEFAULT_REPLAY_MAX_BYTES;
+    const committedUtterances: CommittedUtterance[] = [];
+    let utterance: Buffer[] = [];
+    let utteranceBytes = 0;
+    let bufferedBytes = 0;
     let failingOver = false;
+    // Segment id the fallback's replayed commit must report under (see startFallback).
+    let replayId: string | null = null;
+    const enforceReplayCap = () => {
+      while (bufferedBytes > replayMaxBytes) {
+        const oldest = committedUtterances.find((u) => !u.dropped);
+        if (oldest) {
+          bufferedBytes -= oldest.bytes;
+          logger.warn(
+            { segmentId: oldest.segmentId, bytes: oldest.bytes },
+            "Lab STT replay buffer full; dropping committed audio that cannot be replayed",
+          );
+          oldest.chunks = [];
+          oldest.bytes = 0;
+          oldest.dropped = true;
+        } else if (utterance.length > 0) {
+          const first = utterance.shift()!;
+          utteranceBytes -= first.length;
+          bufferedBytes -= first.length;
+          logger.warn(
+            { bytes: first.length },
+            "Lab STT replay buffer full; dropping the start of the current utterance",
+          );
+        } else {
+          return;
+        }
+      }
+    };
+    const resetReplay = () => {
+      committedUtterances.length = 0;
+      utterance = [];
+      utteranceBytes = 0;
+      bufferedBytes = 0;
+    };
     const aborted = new Error("lab STT connect aborted");
     const dropped = new WeakSet<WebSocket>();
     const abortPending = () => {
@@ -122,13 +172,9 @@ export class LabSTT implements SpeechToTextProvider {
           }
           opened = true;
           ws = socket;
-          for (const chunk of queued.splice(0)) {
-            socket.send(chunk);
-            utterance.push(chunk);
-          }
-          if (endPending) {
-            endPending = false;
-            socket.send(JSON.stringify({ type: "end" }));
+          // Already recorded for replay when appended/committed; only the wire send is deferred.
+          for (const frame of queued.splice(0)) {
+            socket.send(frame ?? JSON.stringify({ type: "end" }));
           }
           resolve();
         });
@@ -148,18 +194,27 @@ export class LabSTT implements SpeechToTextProvider {
           if (message.type === "partial" || message.type === "final") {
             const isFinal = message.type === "final";
             const words = parseWords(message.words);
+            // The lab answers in commit order: the oldest committed utterance owns this message.
+            const owner = committedUtterances[0];
             emitter.emit("transcript", {
-              segmentId,
+              segmentId: owner?.segmentId ?? segmentId,
               transcript: message.text ?? "",
               isFinal,
               language: params.language,
               ...(words ? { words } : {}),
             });
             if (isFinal) {
-              utterance.length = 0;
-              commitSent = false;
-              previousSegmentId = segmentId;
-              segmentId = randomUUID();
+              if (owner) {
+                committedUtterances.shift();
+                bufferedBytes -= owner.bytes;
+              } else {
+                // Final with no commit: the lab ended the current utterance itself.
+                bufferedBytes -= utteranceBytes;
+                utterance = [];
+                utteranceBytes = 0;
+                previousSegmentId = segmentId;
+                segmentId = randomUUID();
+              }
             }
           } else if (message.type === "error") {
             emitter.emit("error", new Error(message.message ?? "lab STT error"));
@@ -205,10 +260,10 @@ export class LabSTT implements SpeechToTextProvider {
     const startFallback = async (): Promise<void> => {
       if (!options.fallback) throw new Error("lab STT unavailable and no fallback configured");
       const session = options.fallback.createSession(params);
-      // The replayed commit was already announced under the lab segment id; keep that id.
+      // Each replayed commit was already announced under its lab segment id; keep that id.
       const idMap = new Map<string, string>();
       session.on("committed", (p) => {
-        if (replayingCommit) idMap.set(p.segmentId, segmentId);
+        if (replayId !== null) idMap.set(p.segmentId, replayId);
         else emitter.emit("committed", p);
       });
       session.on("transcript", (p) =>
@@ -220,17 +275,20 @@ export class LabSTT implements SpeechToTextProvider {
       session.on("error", (e) => emitter.emit("error", e));
       await session.connect();
       delegate = session;
-      for (const chunk of [...utterance.splice(0), ...queued.splice(0)]) {
+      const send = (chunk: Buffer) =>
         session.appendPcm16(resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, session.requiredSampleRate));
-      }
-      if (endPending || commitSent) {
-        // commit() already emitted "committed" before the lab failed; only replay the end.
-        endPending = false;
-        commitSent = false;
-        replayingCommit = true;
+      // Committed utterances first, oldest first, each replayed with its commit (commit() already
+      // emitted "committed" before the lab failed); then the current, uncommitted audio.
+      for (const entry of committedUtterances.splice(0)) {
+        if (entry.dropped) continue;
+        entry.chunks.forEach(send);
+        replayId = entry.segmentId;
         session.commit();
-        replayingCommit = false;
+        replayId = null;
       }
+      utterance.splice(0).forEach(send);
+      queued.length = 0;
+      resetReplay();
     };
 
     return {
@@ -261,11 +319,13 @@ export class LabSTT implements SpeechToTextProvider {
           delegate.appendPcm16(
             resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, delegate.requiredSampleRate),
           );
-        } else if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk);
-          utterance.push(chunk);
         } else {
-          queued.push(chunk);
+          utterance.push(chunk);
+          utteranceBytes += chunk.length;
+          bufferedBytes += chunk.length;
+          enforceReplayCap();
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(chunk);
+          else queued.push(chunk);
         }
       },
       commit() {
@@ -274,18 +334,26 @@ export class LabSTT implements SpeechToTextProvider {
           return;
         }
         emitter.emit("committed", { segmentId, previousSegmentId });
-        commitSent = true;
+        committedUtterances.push({
+          segmentId,
+          chunks: utterance,
+          bytes: utteranceBytes,
+          dropped: false,
+        });
+        utterance = [];
+        utteranceBytes = 0;
+        // Next utterance starts now; the committed one keeps its id until its final arrives.
+        previousSegmentId = segmentId;
+        segmentId = randomUUID();
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "end" }));
         } else {
-          endPending = true;
+          queued.push(null);
         }
       },
       clear() {
         queued.length = 0;
-        utterance.length = 0;
-        commitSent = false;
-        endPending = false;
+        resetReplay();
         if (delegate) {
           delegate.clear();
           return;
@@ -304,9 +372,8 @@ export class LabSTT implements SpeechToTextProvider {
       },
       close() {
         closed = true;
-        endPending = false;
         queued.length = 0;
-        utterance.length = 0;
+        resetReplay();
         delegate?.close();
         const old = ws;
         ws = null;

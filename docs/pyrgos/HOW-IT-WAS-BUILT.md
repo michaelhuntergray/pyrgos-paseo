@@ -134,6 +134,14 @@ A formal log of the Pyrgos additions to this fork, in build order. Each entry sa
 - **Consequence:** a reply waits behind the agent's own queued speech rather than interrupting it. The voice session's own `speak` events now share the same queue code.
 - **Status:** verified: `conversation.test.ts` (spoken from the replies file, held after barge-in and re-spoken when cut off, held during a turn) and `voice-session-conversation.test.ts` (port resolves true on `audio_played`, false on barge-in); server typecheck. **Assumed:** a live session on the PC; the persisted reply cursor in DESIGN.md §5 is still an in-memory offset in `ReplyWatcher`, so a daemon restart re-reads the replies file from the start.
 
+## Lab STT replays every unfinalized utterance (MIC-753 D)
+
+- **Decided:** on lab socket loss the fallback gets every committed utterance whose final never arrived, oldest first, then the current audio; each replayed commit keeps the segment id already announced. The buffer is capped (60 s) and drops the oldest committed audio with a logged warning. **Who:** a Codex review (round 6) flagged that only the current utterance was replayed; the overseer assigned it; Claude implemented.
+- **Changed with it:** the segment id now rotates at commit, not at the final, so two commits awaiting finals no longer share an id; the lab's finals are matched to commits in order.
+- **Rejected:** an unbounded buffer (a stuck lab would grow memory); replaying dropped audio from disk (no such store).
+- **Also:** `lab-speech-roundtrip.mts` now covers the voice -> ledger -> delegation steps (stubbed spawn) beside transcription.
+- **Status:** verified: lab provider tests (4 new), server typecheck, and the script run against a fake loopback lab (all checks pass). **Assumed:** a run against the real lab.
+
 ## Open questions
 
 Design and core seams:
