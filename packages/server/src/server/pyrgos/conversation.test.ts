@@ -317,7 +317,7 @@ describe("conversation: overseer replies reach the voice", () => {
     await conversation.close();
   });
 
-  it("stays busy while a newer turn runs after an older one finishes late", async () => {
+  it("holds replies while the turn that replaced an abandoned stuck turn runs", async () => {
     const speakReply = vi.fn(async () => true);
     const releases: (() => void)[] = [];
     const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
