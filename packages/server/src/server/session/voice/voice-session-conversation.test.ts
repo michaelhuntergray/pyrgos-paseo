@@ -334,6 +334,9 @@ describe("VoiceSession conversation", () => {
     expect(await cut).toBe(false);
     expect(await queued).toBe(false);
     expect(host.emitted.filter(isAudioOutput)).toHaveLength(2);
+    // Queued after the barge-in, while the user is still talking: not played either.
+    expect(await speak("The overseer says: later")).toBe(false);
+    expect(host.emitted.filter(isAudioOutput)).toHaveLength(2);
     await voiceSession.cleanup();
   });
 

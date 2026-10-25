@@ -1125,7 +1125,8 @@ export class VoiceSession {
     const signal = this.abortController.signal;
     const safe = redact(text);
     const played = this.speechQueue.then(async () => {
-      if (this.closed || signal.aborted) return false;
+      // Recheck as the line leaves the queue: the user may have started talking since it was queued.
+      if (this.closed || signal.aborted || this.speechInProgress) return false;
       this.emit({
         type: "activity_log",
         payload: { id: uuidv4(), timestamp: new Date(), type: "assistant", content: safe },
