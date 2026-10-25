@@ -344,11 +344,15 @@ describe("conversation: overseer replies reach the voice", () => {
       join(root, ".agents/feedback/voice/voice-overlap.replies.jsonl"),
       `${JSON.stringify({ text: "late" })}\n`,
     );
-    const first = conversation.handleTranscript("one");
+    let firstSettled = false;
+    const first = conversation.handleTranscript("one").then(() => (firstSettled = true));
     await vi.waitFor(() => expect(releases).toHaveLength(1));
     const second = conversation.handleTranscript("two");
     // The agent abandons the stuck turn after its interrupt timeout and starts the new one.
     await vi.waitFor(() => expect(releases).toHaveLength(2), { timeout: 5000 });
+    // The abandoned turn's wrapper (and its llm=false) settled before the replacement began, so
+    // nothing later can clear the replacement's busy flag; releasing the orphaned brain is a no-op.
+    expect(firstSettled).toBe(true);
     releases[0]!();
     await first;
     now += HOLD_SECONDS * 1000;
