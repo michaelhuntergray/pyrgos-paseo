@@ -197,6 +197,46 @@ describe("VoiceSession conversation", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  test("tells the conversation when the user stops talking", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    const speechStopped = vi.fn();
+    const handleTranscript = vi.fn(async () => {});
+    const { voiceSession, detector, sttSession } = createVoiceSession(tts, async () => ({
+      handleTranscript,
+      bargeIn: async () => {},
+      speechStopped,
+      close: async () => {},
+    }));
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    // The conversation starts with the first transcript.
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "status",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(handleTranscript).toHaveBeenCalled());
+    speechStopped.mockClear();
+    detector.emit("speech_started");
+    await settle();
+    expect(speechStopped).not.toHaveBeenCalled();
+    detector.emit("speech_stopped");
+    await vi.waitFor(() => expect(speechStopped).toHaveBeenCalledTimes(1));
+    await voiceSession.cleanup();
+  });
+
   test("redacts secrets from conversation speech before TTS and the activity log", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {

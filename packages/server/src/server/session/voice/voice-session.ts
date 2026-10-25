@@ -138,6 +138,8 @@ const CONVERSATION_CLOSE_TIMEOUT_MS = 3000;
 export interface VoiceConversation {
   handleTranscript(text: string): Promise<void>;
   bargeIn(): Promise<void>;
+  /** The user stopped talking (VAD); pairs with the bargeIn at speech start. */
+  speechStopped?(): void;
   close(): Promise<void>;
 }
 
@@ -716,6 +718,7 @@ export class VoiceSession {
         isSpeaking: false,
       },
     });
+    void this.conversation?.then((c) => c.speechStopped?.()).catch(() => undefined);
   }
 
   private async ensureAudioBufferForFormat(

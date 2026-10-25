@@ -262,6 +262,7 @@ describe("conversation: overseer replies reach the voice", () => {
     const { conversation, reply, advance } = await withReplies(speakReply);
     reply("tests green");
     await conversation.bargeIn();
+    conversation.speechStopped();
     expect(await conversation.pumpReplies()).toEqual([]);
     expect(speakReply).not.toHaveBeenCalled();
     advance(HOLD_SECONDS * 1000);
@@ -270,6 +271,20 @@ describe("conversation: overseer replies reach the voice", () => {
     advance(HOLD_SECONDS * 1000);
     expect(await conversation.pumpReplies()).toEqual(["tests green"]);
     expect(speakReply).toHaveBeenCalledTimes(2);
+    await conversation.close();
+  });
+
+  it("holds replies for as long as the user keeps talking, then for the hold window", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("deploy done");
+    await conversation.bargeIn();
+    advance(HOLD_SECONDS * 3000); // a long utterance outlives the hold window
+    expect(await conversation.pumpReplies()).toEqual([]);
+    conversation.speechStopped();
+    expect(await conversation.pumpReplies()).toEqual([]);
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["deploy done"]);
     await conversation.close();
   });
 

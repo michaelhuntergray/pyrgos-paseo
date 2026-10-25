@@ -61,6 +61,8 @@ export interface PyrgosConversation {
   readonly sessionId: string;
   handleTranscript(text: string): Promise<void>;
   bargeIn(): Promise<void>;
+  /** The user stopped talking: replies wait out the hold window from here. */
+  speechStopped(): void;
   /** Speak any overseer replies the turn gate allows now; returns the ones heard. */
   pumpReplies(): Promise<string[]>;
   close(): Promise<void>;
@@ -156,6 +158,8 @@ export async function createPyrgosConversation(
     sessionId,
     async handleTranscript(text) {
       const trimmed = text.trim();
+      // A transcript means the utterance ended, even if the VAD stop was lost.
+      gate.set("user", false);
       if (!trimmed) return;
       // Stop the running turn before this transcript becomes the consent text, so the old turn
       // cannot agree an item on the new turn's yes. Only the newest transcript goes on.
@@ -174,9 +178,14 @@ export async function createPyrgosConversation(
       await runTurn(trimmed);
     },
     bargeIn: () => {
-      // The user started talking: no reply plays until they have been quiet for the hold window.
+      // The user started talking: no reply plays until they stop and stay quiet for the hold window.
+      gate.set("user", true);
       gate.hold();
       return agent.bargeIn();
+    },
+    speechStopped: () => {
+      gate.set("user", false);
+      gate.hold();
     },
     pumpReplies,
     close: () => {
