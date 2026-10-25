@@ -223,11 +223,15 @@ export interface ReplyPumpInput {
   watcher: ReplyWatcher;
   gate: TurnGate;
   session: VoiceSession;
-  speak: (line: string) => Promise<void>;
+  /** Resolves true once the user heard the line to the end, false when playback was cut off. */
+  speak: (line: string) => Promise<boolean>;
 }
 
+/** Tries per reply, interrupted ones included, before it is dropped so it cannot block the queue. */
+export const MAX_REPLY_ATTEMPTS = 3;
+
 export class ReplyPump {
-  private readonly pending: { text: string; logged: boolean }[] = [];
+  private readonly pending: { text: string; logged: boolean; attempts: number }[] = [];
 
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -240,7 +244,8 @@ export class ReplyPump {
   }
 
   private async drain(): Promise<string[]> {
-    for (const text of await this.input.watcher.poll()) this.pending.push({ text, logged: false });
+    for (const text of await this.input.watcher.poll())
+      this.pending.push({ text, logged: false, attempts: 0 });
     const spoken: string[] = [];
     while (this.input.gate.idle()) {
       const reply = this.pending[0];
@@ -249,9 +254,19 @@ export class ReplyPump {
         await this.input.session.append("overseer", reply.text);
         reply.logged = true;
       }
-      await this.input.speak(replyLine(reply.text));
-      this.pending.shift();
-      spoken.push(reply.text);
+      reply.attempts += 1;
+      // Ack on audible completion, not on first audio: a reply cut off mid-playback stays queued and is
+      // re-spoken after the gate's hold window, up to MAX_REPLY_ATTEMPTS. Either way an interruption
+      // ends this drain, so nothing else is spoken over the user.
+      const heard = (await this.input.speak(replyLine(reply.text))) === true;
+      if (heard) {
+        this.pending.shift();
+        spoken.push(reply.text);
+        continue;
+      }
+      if (reply.attempts >= MAX_REPLY_ATTEMPTS) this.pending.shift();
+      this.input.gate.hold();
+      break;
     }
     return spoken;
   }

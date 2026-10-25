@@ -52,6 +52,64 @@ describe("TTSManager", () => {
     expect(audioMessage?.payload.isLastChunk).toBe(true);
   });
 
+  it("reports heard only once every chunk is confirmed, not when aborted mid-playback", async () => {
+    const manager = new TTSManager("s1", pino({ level: "silent" }), new FakeTts());
+
+    const heard = await manager.generateAndWaitForPlayback(
+      "hello",
+      (msg) => {
+        if (msg.type === "audio_output") manager.confirmAudioPlayed(msg.payload.id);
+      },
+      new AbortController().signal,
+      true,
+    );
+    expect(heard).toBe(true);
+
+    const abort = new AbortController();
+    const interrupted = await manager.generateAndWaitForPlayback(
+      "hello",
+      (msg) => {
+        // Audio went out but the user barged in before the client confirmed playback.
+        if (msg.type === "audio_output") abort.abort();
+      },
+      abort.signal,
+      true,
+    );
+    expect(interrupted).toBe(false);
+  });
+
+  it("reports not heard when a later segment is cut off after earlier ones were confirmed", async () => {
+    const manager = new TTSManager("s1", pino({ level: "silent" }), new FakeTts());
+    const twoSegments = "First sentence of the reply. Second sentence of the reply.";
+
+    const heard = await manager.generateAndWaitForPlayback(
+      twoSegments,
+      (msg) => {
+        if (msg.type === "audio_output") manager.confirmAudioPlayed(msg.payload.id);
+      },
+      new AbortController().signal,
+      true,
+    );
+    expect(heard).toBe(true);
+
+    const abort = new AbortController();
+    let outputs = 0;
+    const interrupted = await manager.generateAndWaitForPlayback(
+      twoSegments,
+      (msg) => {
+        if (msg.type !== "audio_output") return;
+        outputs += 1;
+        // The first segment plays to the end; the user barges in during the second.
+        if (outputs === 1) manager.confirmAudioPlayed(msg.payload.id);
+        else abort.abort();
+      },
+      abort.signal,
+      true,
+    );
+    expect(outputs).toBe(2);
+    expect(interrupted).toBe(false);
+  });
+
   it("splits long text into safe synthesis segments", async () => {
     const calls: string[] = [];
     const tts: TextToSpeechProvider = {

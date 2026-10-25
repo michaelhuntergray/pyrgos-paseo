@@ -163,3 +163,11 @@ Decision log for the voice conversation agent in this fork. Ordered by build seq
 - **Chosen:** the dispatch launcher runs `$PYRGOS_DISPATCH_CMD worker <spec> --cwd <project folder>` with a fixed argv (no shell), and treats a start error or a non-zero exit within two seconds as a launch failure recorded on the item.
 - **Consequence:** voice mode still needs an agent selected in the app, but spoken turns no longer go to it.
 - **Status:** verified: unit tests for the tools, launcher, conversation and voice session; a live haiku run reached `agreed` with the dispatcher dry run. **Assumed:** a spoken turn from a real microphone through the app, and a real (non-dry-run) launch.
+
+## Ack overseer replies on audible completion (MIC-753 A)
+
+- **Decided:** a spoken overseer reply counts as delivered only after the client confirms every chunk played. `generateAndWaitForPlayback` now resolves `true`/`false` (heard / cut off), and `ReplyPump` keeps a cut-off reply queued, ends that drain, holds the turn gate for 20 s and re-speaks it at the first idle boundary after the hold, up to 3 tries. **Who:** a Codex review flagged it; the overseer assigned it; Claude implemented. A first Codex review of the PR caught that the retry fired on the very next idle pump and that a final interruption let the next reply play in the same drain; both fixed before merge.
+- **Reversal:** the design note acked at playback _start_ (first `audio_output`) to avoid repeats. That lost any reply the user barged in on, because the TTS manager resolves an aborted playback the same way as a finished one.
+- **Rejected:** a time-based retry window alone, because it guesses at playback length; a client protocol change, because the client already sends `audio_played` only after a chunk finishes.
+- **Consequence:** an interrupted reply may be heard twice in part; a reply that keeps getting cut off is dropped after 3 tries so it cannot block the queue. Existing callers ignore the new return value.
+- **Status:** verified: unit tests in `tts-manager.test.ts` and `feed.test.ts`, server typecheck. **Assumed:** behaviour in a live session; `ReplyPump` is not yet wired into the running voice session.
