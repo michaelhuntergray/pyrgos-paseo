@@ -142,6 +142,13 @@ export async function createPyrgosConversation(
   const timer = replies && pollMs > 0 ? setInterval(() => void pumpReplies(), pollMs) : null;
   timer?.unref?.();
 
+  let userTalking = false;
+  function userStopped(): void {
+    userTalking = false;
+    gate.set("user", false);
+    gate.hold();
+  }
+
   async function runTurn(text: string): Promise<void> {
     gate.set("llm", true);
     try {
@@ -159,7 +166,7 @@ export async function createPyrgosConversation(
     async handleTranscript(text) {
       const trimmed = text.trim();
       // A transcript means the utterance ended, even if the VAD stop was lost.
-      gate.set("user", false);
+      if (userTalking) userStopped();
       if (!trimmed) return;
       // Stop the running turn before this transcript becomes the consent text, so the old turn
       // cannot agree an item on the new turn's yes. Only the newest transcript goes on.
@@ -179,14 +186,12 @@ export async function createPyrgosConversation(
     },
     bargeIn: () => {
       // The user started talking: no reply plays until they stop and stay quiet for the hold window.
+      userTalking = true;
       gate.set("user", true);
       gate.hold();
       return agent.bargeIn();
     },
-    speechStopped: () => {
-      gate.set("user", false);
-      gate.hold();
-    },
+    speechStopped: userStopped,
     pumpReplies,
     close: () => {
       if (timer) clearInterval(timer);

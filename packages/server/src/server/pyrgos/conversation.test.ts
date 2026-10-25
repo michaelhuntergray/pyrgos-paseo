@@ -288,6 +288,20 @@ describe("conversation: overseer replies reach the voice", () => {
     await conversation.close();
   });
 
+  it("starts the hold window at the transcript when the VAD stop never came", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("build green");
+    await conversation.bargeIn();
+    advance(HOLD_SECONDS * 3000);
+    await conversation.handleTranscript("what changed");
+    await new Promise((r) => setTimeout(r, 10)); // let the turn-end pump run
+    expect(speakReply).not.toHaveBeenCalled();
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["build green"]);
+    await conversation.close();
+  });
+
   it("does not speak a reply while a turn is running", async () => {
     const speakReply = vi.fn(async () => true);
     let release: (() => void) | undefined;
