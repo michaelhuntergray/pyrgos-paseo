@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Brain, BrainEvent, ConversationEvent, ToolDef } from "./conversation-agent/index.js";
 import { createPyrgosConversation } from "./conversation.js";
+import { HOLD_SECONDS } from "./ledger/feed.js";
 import type { LedgerItem } from "./ledger/ledger.js";
 
 type Step = (tools: Map<string, ToolDef>) => Promise<string>;
@@ -11,10 +12,10 @@ type Step = (tools: Map<string, ToolDef>) => Promise<string>;
 /** A brain that runs scripted tool calls per turn, the way the SDK brain would. */
 function scriptedBrain(tools: ToolDef[], turns: Step[][], reply = "ok."): Brain {
   const byName = new Map(tools.map((t) => [t.name, t]));
-  let turn = 0;
+  const pending = [...turns];
   return {
     async *runTurn(): AsyncGenerator<BrainEvent> {
-      for (const step of turns[turn++] ?? []) {
+      for (const step of pending.shift() ?? []) {
         yield { type: "tool_use", name: "x" };
         await step(byName);
         yield { type: "tool_result" };
@@ -210,5 +211,198 @@ describe("conversation: reviewer inputs", () => {
     await pending;
     expect(agreeResult).toMatch(/^Not done/);
     expect(launch).not.toHaveBeenCalled();
+  });
+});
+
+describe("conversation: overseer replies reach the voice", () => {
+  const quietBrain = (): Brain => ({
+    async *runTurn(): AsyncGenerator<BrainEvent> {
+      yield { type: "text", text: "Okay." };
+    },
+    async interrupt() {},
+    async close() {},
+  });
+
+  async function withReplies(speakReply: (line: string) => Promise<boolean>) {
+    const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
+    let now = 0;
+    const conversation = await createPyrgosConversation({
+      env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
+      onEvent: () => {},
+      launch: vi.fn(async () => {}),
+      announce: async () => {},
+      brainFactory: () => quietBrain(),
+      sessionId: "voice-replies",
+      speakReply,
+      clock: () => now,
+      replyPollMs: 0,
+    });
+    const reply = (text: string) =>
+      appendFileSync(
+        join(root, ".agents/feedback/voice/voice-replies.replies.jsonl"),
+        `${JSON.stringify({ text })}\n`,
+      );
+    return { conversation, reply, advance: (ms: number) => (now += ms) };
+  }
+
+  it("speaks a reply the overseer writes to the session's replies file", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply } = await withReplies(speakReply);
+    reply("PR merged");
+    expect(await conversation.pumpReplies()).toEqual(["PR merged"]);
+    expect(speakReply).toHaveBeenCalledWith("The overseer says: PR merged");
+    await conversation.close();
+  });
+
+  it("holds replies after the user starts talking, and re-speaks one the user cut off", async () => {
+    const speakReply = vi
+      .fn<(line: string) => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("tests green");
+    await conversation.bargeIn();
+    conversation.speechStopped();
+    expect(await conversation.pumpReplies()).toEqual([]);
+    expect(speakReply).not.toHaveBeenCalled();
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual([]);
+    expect(speakReply).toHaveBeenCalledTimes(1);
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["tests green"]);
+    expect(speakReply).toHaveBeenCalledTimes(2);
+    await conversation.close();
+  });
+
+  it("holds replies for as long as the user keeps talking, then for the hold window", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("deploy done");
+    await conversation.bargeIn();
+    advance(HOLD_SECONDS * 3000); // a long utterance outlives the hold window
+    expect(await conversation.pumpReplies()).toEqual([]);
+    conversation.speechStopped();
+    expect(await conversation.pumpReplies()).toEqual([]);
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["deploy done"]);
+    await conversation.close();
+  });
+
+  it("keeps replies held when a late transcript lands while the user is talking again", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("build green");
+    await conversation.bargeIn();
+    conversation.speechStopped();
+    await conversation.bargeIn(); // a second utterance starts before the first is transcribed
+    await conversation.handleTranscript("what changed");
+    advance(HOLD_SECONDS * 3000);
+    expect(await conversation.pumpReplies()).toEqual([]);
+    expect(speakReply).not.toHaveBeenCalled();
+    conversation.speechStopped();
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["build green"]);
+    await conversation.close();
+  });
+
+  it("holds a reply after the first transcript, whose VAD events the conversation never saw", async () => {
+    const speakReply = vi.fn(async () => true);
+    const { conversation, reply, advance } = await withReplies(speakReply);
+    reply("first");
+    await conversation.handleTranscript("hello");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(speakReply).not.toHaveBeenCalled();
+    advance(HOLD_SECONDS * 1000);
+    expect(await conversation.pumpReplies()).toEqual(["first"]);
+    await conversation.close();
+  });
+
+  it("holds replies while the turn that replaced an abandoned stuck turn runs", async () => {
+    const speakReply = vi.fn(async () => true);
+    const releases: (() => void)[] = [];
+    const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
+    let now = 0;
+    const conversation = await createPyrgosConversation({
+      env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
+      onEvent: () => {},
+      launch: vi.fn(async () => {}),
+      announce: async () => {},
+      sessionId: "voice-overlap",
+      speakReply,
+      clock: () => now,
+      replyPollMs: 0,
+      brainFactory: () => ({
+        async *runTurn(): AsyncGenerator<BrainEvent> {
+          await new Promise<void>((r) => releases.push(r));
+          yield { type: "text", text: "Okay." };
+        },
+        async interrupt() {}, // the old turn ignores the interrupt and ends later
+        async close() {},
+      }),
+    });
+    appendFileSync(
+      join(root, ".agents/feedback/voice/voice-overlap.replies.jsonl"),
+      `${JSON.stringify({ text: "late" })}\n`,
+    );
+    let firstSettled = false;
+    const first = conversation.handleTranscript("one").then(() => (firstSettled = true));
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const second = conversation.handleTranscript("two");
+    // The agent abandons the stuck turn after its interrupt timeout and starts the new one.
+    await vi.waitFor(() => expect(releases).toHaveLength(2), { timeout: 5000 });
+    // The abandoned turn's wrapper (and its llm=false) settled before the replacement began, so
+    // nothing later can clear the replacement's busy flag; releasing the orphaned brain is a no-op.
+    expect(firstSettled).toBe(true);
+    releases[0]!();
+    await first;
+    now += HOLD_SECONDS * 1000;
+    expect(await conversation.pumpReplies()).toEqual([]);
+    releases[1]!();
+    await second;
+    await vi.waitFor(() => expect(speakReply).toHaveBeenCalledTimes(1));
+    await conversation.close();
+  });
+
+  it("does not speak a reply while a turn is running", async () => {
+    const speakReply = vi.fn(async () => true);
+    let release: (() => void) | undefined;
+    let now = 0;
+    const root = mkdtempSync(join(tmpdir(), "conv-replies-"));
+    const conversation = await createPyrgosConversation({
+      env: { ALCHEMIST_HARNESS: root, VOICE_OVERSEER_SURFACE: "" },
+      onEvent: () => {},
+      launch: vi.fn(async () => {}),
+      announce: async () => {},
+      sessionId: "voice-busy",
+      speakReply,
+      clock: () => now,
+      replyPollMs: 0,
+      brainFactory: () => ({
+        async *runTurn(): AsyncGenerator<BrainEvent> {
+          await new Promise<void>((r) => (release = r));
+          yield { type: "text", text: "Okay." };
+        },
+        async interrupt() {
+          release?.();
+        },
+        async close() {},
+      }),
+    });
+    appendFileSync(
+      join(root, ".agents/feedback/voice/voice-busy.replies.jsonl"),
+      `${JSON.stringify({ text: "later" })}\n`,
+    );
+    const turn = conversation.handleTranscript("what is running");
+    await vi.waitFor(() => expect(release).toBeDefined());
+    now += HOLD_SECONDS * 1000; // a long turn: the hold after the transcript has passed
+    expect(await conversation.pumpReplies()).toEqual([]);
+    expect(speakReply).not.toHaveBeenCalled();
+    release?.();
+    await turn;
+    // The end of the turn is a boundary: the reply plays without waiting for the poll timer.
+    await vi.waitFor(() => expect(speakReply).toHaveBeenCalledWith("The overseer says: later"));
+    expect(await conversation.pumpReplies()).toEqual([]);
+    expect(speakReply).toHaveBeenCalledTimes(1);
+    await conversation.close();
   });
 });

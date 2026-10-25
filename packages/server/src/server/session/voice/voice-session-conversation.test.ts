@@ -197,6 +197,46 @@ describe("VoiceSession conversation", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  test("tells the conversation when the user stops talking", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    const speechStopped = vi.fn();
+    const handleTranscript = vi.fn(async () => {});
+    const { voiceSession, detector, sttSession } = createVoiceSession(tts, async () => ({
+      handleTranscript,
+      bargeIn: async () => {},
+      speechStopped,
+      close: async () => {},
+    }));
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    // The conversation starts with the first transcript.
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "status",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(handleTranscript).toHaveBeenCalled());
+    speechStopped.mockClear();
+    detector.emit("speech_started");
+    await settle();
+    expect(speechStopped).not.toHaveBeenCalled();
+    detector.emit("speech_stopped");
+    await vi.waitFor(() => expect(speechStopped).toHaveBeenCalledTimes(1));
+    await voiceSession.cleanup();
+  });
+
   test("redacts secrets from conversation speech before TTS and the activity log", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {
@@ -240,6 +280,63 @@ describe("VoiceSession conversation", () => {
     expect(synth).toHaveBeenCalled();
     expect(spoken.join(" ")).not.toContain("hunter2secret");
     expect(JSON.stringify(host.emitted)).not.toContain("hunter2secret");
+    await voiceSession.cleanup();
+  });
+
+  test("gives the conversation a speak port that reports heard vs cut off", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    let speak!: (text: string) => Promise<boolean>;
+    const parts = createVoiceSession(tts, async (_onEvent, io) => {
+      speak = io.speak;
+      return {
+        handleTranscript: async () => {},
+        bargeIn: async () => {},
+        close: async () => {},
+      };
+    });
+    const { voiceSession, detector, sttSession, host } = parts;
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "hello",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(speak).toBeDefined());
+
+    // Heard: the client confirms the chunk played to the end.
+    const heard = speak("The overseer says: merged");
+    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(1));
+    const first = host.emitted.find(isAudioOutput) as Extract<
+      SessionOutboundMessage,
+      { type: "audio_output" }
+    >;
+    voiceSession.handleAudioPlayed(first.payload.id);
+    expect(await heard).toBe(true);
+
+    // Cut off: the user starts talking before the client confirms playback.
+    const cut = speak("The overseer says: tests green");
+    // Queued behind it: never starts once the user has started talking.
+    const queued = speak("The overseer says: deploy done");
+    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(2));
+    detector.emit("speech_started");
+    expect(await cut).toBe(false);
+    expect(await queued).toBe(false);
+    expect(host.emitted.filter(isAudioOutput)).toHaveLength(2);
+    // Queued after the barge-in, while the user is still talking: not played either.
+    expect(await speak("The overseer says: later")).toBe(false);
+    expect(host.emitted.filter(isAudioOutput)).toHaveLength(2);
     await voiceSession.cleanup();
   });
 

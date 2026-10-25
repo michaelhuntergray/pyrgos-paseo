@@ -12,7 +12,13 @@ import {
   type ToolDef,
 } from "./conversation-agent/index.js";
 import { createLedgerTools } from "./conversation-agent/ledger-tools.js";
-import { createAnnouncer, createVoiceSession } from "./ledger/feed.js";
+import {
+  ReplyPump,
+  ReplyWatcher,
+  TurnGate,
+  createAnnouncer,
+  createVoiceSession,
+} from "./ledger/feed.js";
 import { createJsonlLedgerStore, ledgerFilePath, voiceFeedDir } from "./ledger/jsonl-store.js";
 import { createLedger, type Ledger } from "./ledger/ledger.js";
 import { createDispatchLauncher } from "./launcher.js";
@@ -37,13 +43,28 @@ export interface PyrgosConversationOptions {
   /** Test seam for the dispatch launcher. */
   launch?: Parameters<typeof createLedger>[0]["launch"];
   announce?: Parameters<typeof createLedger>[0]["announce"];
+  /**
+   * Speaks an overseer reply; true once it was heard to the end. When set, replies the overseer
+   * writes to this session's replies file are spoken at turn boundaries.
+   */
+  speakReply?: (line: string) => Promise<boolean>;
+  /** How often to look for overseer replies; 0 turns the timer off (tests pump by hand). */
+  replyPollMs?: number;
+  /** Test seam for the turn gate's hold window. */
+  clock?: () => number;
 }
+
+export const REPLY_POLL_MS = 2000;
 
 export interface PyrgosConversation {
   readonly ledger: Ledger;
   readonly sessionId: string;
   handleTranscript(text: string): Promise<void>;
   bargeIn(): Promise<void>;
+  /** The user stopped talking: replies wait out the hold window from here. */
+  speechStopped(): void;
+  /** Speak any overseer replies the turn gate allows now; returns the ones heard. */
+  pumpReplies(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -90,6 +111,19 @@ export async function createPyrgosConversation(
       context: await buildContext(harnessRoot).catch(() => undefined),
     });
 
+  const gate = new TurnGate(options.clock);
+  const speakReply = options.speakReply;
+  const replies = speakReply
+    ? new ReplyPump({
+        watcher: new ReplyWatcher(feed.repliesPath),
+        gate,
+        session: feed,
+        speak: speakReply,
+      })
+    : null;
+  const pumpReplies = (): Promise<string[]> =>
+    replies ? replies.pump().catch(() => []) : Promise.resolve([]);
+
   const spoken: string[] = [];
   const agent = new ConversationAgent({
     brain,
@@ -104,11 +138,36 @@ export async function createPyrgosConversation(
     },
   });
 
+  const pollMs = options.replyPollMs ?? REPLY_POLL_MS;
+  const timer = replies && pollMs > 0 ? setInterval(() => void pumpReplies(), pollMs) : null;
+  timer?.unref?.();
+
+  function userStopped(): void {
+    gate.set("user", false);
+    gate.hold();
+  }
+
+  // One turn at a time: handleTranscript awaits the old turn's settle before the next runTurn.
+  async function runTurn(text: string): Promise<void> {
+    gate.set("llm", true);
+    try {
+      await agent.handleTranscript(text);
+    } finally {
+      gate.set("llm", false);
+    }
+    // A turn boundary: let a waiting overseer reply in.
+    void pumpReplies();
+  }
+
   return {
     ledger,
     sessionId,
     async handleTranscript(text) {
       const trimmed = text.trim();
+      // A transcript means an utterance ended, even one whose VAD events this conversation missed
+      // (it starts on the first transcript): hold replies from here. It leaves the user flag alone:
+      // the VAD stop always precedes transcription, so a set flag means a newer utterance is live.
+      gate.hold();
       if (!trimmed) return;
       // Stop the running turn before this transcript becomes the consent text, so the old turn
       // cannot agree an item on the new turn's yes. Only the newest transcript goes on.
@@ -124,9 +183,19 @@ export async function createPyrgosConversation(
         latestRef = null;
       }
       if (ticket !== latestTicket) return;
-      await agent.handleTranscript(trimmed);
+      await runTurn(trimmed);
     },
-    bargeIn: () => agent.bargeIn(),
-    close: () => agent.close(),
+    bargeIn: () => {
+      // The user started talking: no reply plays until they stop and stay quiet for the hold window.
+      gate.set("user", true);
+      gate.hold();
+      return agent.bargeIn();
+    },
+    speechStopped: userStopped,
+    pumpReplies,
+    close: () => {
+      if (timer) clearInterval(timer);
+      return agent.close();
+    },
   };
 }
