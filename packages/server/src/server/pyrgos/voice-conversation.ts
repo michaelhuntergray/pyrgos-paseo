@@ -1,4 +1,8 @@
-import type { VoiceConversation, VoiceConversationEvent } from "../session/voice/voice-session.js";
+import type {
+  VoiceConversation,
+  VoiceConversationEvent,
+  VoiceConversationIO,
+} from "../session/voice/voice-session.js";
 import { createPyrgosConversation, type PyrgosConversationOptions } from "./conversation.js";
 
 /** Voice conversation is on unless PYRGOS_VOICE_CONVERSATION=0. */
@@ -13,11 +17,17 @@ export function pyrgosConversationEnabled(env: NodeJS.ProcessEnv = process.env):
 export function createVoiceConversationFactory(
   env: NodeJS.ProcessEnv = process.env,
   overrides: Partial<PyrgosConversationOptions> = {},
-): ((onEvent: (event: VoiceConversationEvent) => void) => Promise<VoiceConversation>) | undefined {
+):
+  | ((
+      onEvent: (event: VoiceConversationEvent) => void,
+      io: VoiceConversationIO,
+    ) => Promise<VoiceConversation>)
+  | undefined {
   if (!pyrgosConversationEnabled(env)) return undefined;
-  return (onEvent) =>
+  return (onEvent, io) =>
     createPyrgosConversation({
       env,
+      speakReply: io.speak,
       ...overrides,
       onEvent: (event) => {
         if (event.type === "speak") onEvent({ type: "speak", text: event.text, kind: event.kind });

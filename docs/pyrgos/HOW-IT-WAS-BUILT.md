@@ -171,3 +171,10 @@ Decision log for the voice conversation agent in this fork. Ordered by build seq
 - **Rejected:** a time-based retry window alone, because it guesses at playback length; a client protocol change, because the client already sends `audio_played` only after a chunk finishes.
 - **Consequence:** an interrupted reply may be heard twice in part; a reply that keeps getting cut off is dropped after 3 tries so it cannot block the queue. Existing callers ignore the new return value.
 - **Status:** verified: unit tests in `tts-manager.test.ts` and `feed.test.ts`, server typecheck. **Assumed:** behaviour in a live session; `ReplyPump` is not yet wired into the running voice session.
+
+## Wire the reply pump into the voice session (MIC-753)
+
+- **Decided:** the voice session passes its conversation a `speak` port that plays a line behind any queued speech and resolves heard or cut off. The Pyrgos conversation runs `ReplyPump` on it: a 2 s poll plus a pump at every turn end; the gate is busy while a turn runs, and a barge-in holds it for 20 s. **Who:** the overseer assigned it; Claude implemented.
+- **Rejected:** firing overseer replies as ordinary `speak` events, because that path is fire-and-forget and cannot report a cut-off; a separate per-user-speech flag, because no event ends it if speech stops without a final transcript, so the hold window stands in for it.
+- **Consequence:** a reply waits behind the agent's own queued speech rather than interrupting it. The voice session's own `speak` events now share the same queue code.
+- **Status:** verified: `conversation.test.ts` (spoken from the replies file, held after barge-in and re-spoken when cut off, held during a turn) and `voice-session-conversation.test.ts` (port resolves true on `audio_played`, false on barge-in); server typecheck. **Assumed:** a live session on the PC; the persisted reply cursor in DESIGN.md §5 is still an in-memory offset in `ReplyWatcher`, so a daemon restart re-reads the replies file from the start.

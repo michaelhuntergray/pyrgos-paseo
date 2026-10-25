@@ -146,12 +146,21 @@ export type VoiceConversationEvent =
   | { type: "error"; message: string }
   | { type: "other" };
 
+/** What a conversation may do with the voice beyond its event stream. */
+export interface VoiceConversationIO {
+  /** Plays after any queued speech; true once the client confirmed it played to the end. */
+  speak(text: string): Promise<boolean>;
+}
+
 export interface VoiceSessionOptions {
   /**
    * When set, final transcripts go to this conversation instead of `host.sendSpokenInput`.
    * Created lazily on the first transcript; its `speak` events are played through TTS in order.
    */
-  conversation?: (onEvent: (event: VoiceConversationEvent) => void) => Promise<VoiceConversation>;
+  conversation?: (
+    onEvent: (event: VoiceConversationEvent) => void,
+    io: VoiceConversationIO,
+  ) => Promise<VoiceConversation>;
   host: VoiceSessionHost;
   logger: pino.Logger;
   sessionId: string;
@@ -1102,8 +1111,38 @@ export class VoiceSession {
   private getConversation(): Promise<VoiceConversation> | null {
     const factory = this.conversationFactory;
     if (!factory) return null;
-    this.conversation ??= factory((event) => this.handleConversationEvent(event));
+    this.conversation ??= factory((event) => this.handleConversationEvent(event), {
+      speak: (text) => this.speakConversationLine(text),
+    });
     return this.conversation;
+  }
+
+  /** Queue a line behind earlier speech; resolves true only if it played to the end. */
+  private speakConversationLine(text: string): Promise<boolean> {
+    const signal = this.abortController.signal;
+    const safe = redact(text);
+    const played = this.speechQueue.then(async () => {
+      if (this.closed || signal.aborted) return false;
+      this.emit({
+        type: "activity_log",
+        payload: { id: uuidv4(), timestamp: new Date(), type: "assistant", content: safe },
+      });
+      return this.ttsManager.generateAndWaitForPlayback(
+        safe,
+        (msg) => this.emit(msg),
+        signal,
+        true,
+      );
+    });
+    const heard = played.catch((error) => {
+      this.sessionLogger.warn(
+        { message: redact(error instanceof Error ? error.message : String(error)) },
+        "Voice conversation playback failed",
+      );
+      return false;
+    });
+    this.speechQueue = heard.then(() => undefined);
+    return heard;
   }
 
   /** Fire and forget: the turn runs to its end while the next utterance may barge in. */
@@ -1133,29 +1172,7 @@ export class VoiceSession {
       return;
     }
     if (event.type !== "speak") return;
-    const signal = this.abortController.signal;
-    const text = redact(event.text);
-    this.speechQueue = this.speechQueue
-      .then(async () => {
-        if (this.closed || signal.aborted) return undefined;
-        this.emit({
-          type: "activity_log",
-          payload: { id: uuidv4(), timestamp: new Date(), type: "assistant", content: text },
-        });
-        await this.ttsManager.generateAndWaitForPlayback(
-          text,
-          (msg) => this.emit(msg),
-          signal,
-          true,
-        );
-        return undefined;
-      })
-      .catch((error) => {
-        this.sessionLogger.warn(
-          { message: redact(error instanceof Error ? error.message : String(error)) },
-          "Voice conversation playback failed",
-        );
-      });
+    void this.speakConversationLine(event.text);
   }
 
   private registerVoiceBridgeForAgent(agentId: string): void {

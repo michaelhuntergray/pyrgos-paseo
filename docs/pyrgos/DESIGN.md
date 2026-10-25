@@ -327,7 +327,9 @@ delivery uses a persisted cursor, not memory, and the replies file itself is the
 when the client confirmed every chunk played (`audio_played`), and `false` when a barge-in or abort cut it off. `ReplyPump` keeps an
 interrupted reply at the head of its queue, ends that drain, holds the `TurnGate` for `HOLD_SECONDS` (20 s) and re-speaks it at the first idle boundary after the hold, up to `MAX_REPLY_ATTEMPTS` (3) tries, then drops
 it so one reply cannot block the queue (MIC-753 A; this replaces the earlier ack at first `audio_output`, which lost a reply cut off
-before it was heard). Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
+before it was heard). Wiring: the voice session hands its conversation a `speak` port (`VoiceConversationIO`) that queues behind
+other speech and resolves heard/cut off; `createPyrgosConversation` runs the `ReplyPump` on it, polling every `REPLY_POLL_MS` (2 s) and
+at each turn end. The gate is busy (`llm`) while a turn runs, and a barge-in holds it for `HOLD_SECONDS`. Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
 repeat). A crash mid-sentence drops the unspoken remainder of that one reply,
 which is the deliberate choice over repeating it. Replies that arrive while voice mode is off (`isVoiceMode` false) stay unacked in the
 file and are spoken at the next turn boundary after voice mode turns on, including after a restart. If the file shrinks or is replaced

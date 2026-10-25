@@ -243,6 +243,56 @@ describe("VoiceSession conversation", () => {
     await voiceSession.cleanup();
   });
 
+  test("gives the conversation a speak port that reports heard vs cut off", async () => {
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech() {
+        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
+      },
+    };
+    let speak!: (text: string) => Promise<boolean>;
+    const parts = createVoiceSession(tts, async (_onEvent, io) => {
+      speak = io.speak;
+      return {
+        handleTranscript: async () => {},
+        bargeIn: async () => {},
+        close: async () => {},
+      };
+    });
+    const { voiceSession, detector, sttSession, host } = parts;
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "s1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "s1",
+      transcript: "hello",
+      isFinal: true,
+      language: "en",
+      avgLogprob: -0.1,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() => expect(speak).toBeDefined());
+
+    // Heard: the client confirms the chunk played to the end.
+    const heard = speak("The overseer says: merged");
+    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(1));
+    const first = host.emitted.find(isAudioOutput) as Extract<
+      SessionOutboundMessage,
+      { type: "audio_output" }
+    >;
+    voiceSession.handleAudioPlayed(first.payload.id);
+    expect(await heard).toBe(true);
+
+    // Cut off: the user starts talking before the client confirms playback.
+    const cut = speak("The overseer says: tests green");
+    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(2));
+    detector.emit("speech_started");
+    expect(await cut).toBe(false);
+    await voiceSession.cleanup();
+  });
+
   test("cleanup does not hang when the conversation factory never resolves", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
