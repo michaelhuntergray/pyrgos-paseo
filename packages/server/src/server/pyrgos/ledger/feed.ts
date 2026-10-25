@@ -256,11 +256,17 @@ export class ReplyPump {
       }
       reply.attempts += 1;
       // Ack on audible completion, not on first audio: a reply cut off mid-playback stays queued and is
-      // re-spoken at the next turn boundary, up to MAX_REPLY_ATTEMPTS.
+      // re-spoken after the gate's hold window, up to MAX_REPLY_ATTEMPTS. Either way an interruption
+      // ends this drain, so nothing else is spoken over the user.
       const heard = (await this.input.speak(replyLine(reply.text))) !== false;
-      if (!heard && reply.attempts < MAX_REPLY_ATTEMPTS) break;
-      this.pending.shift();
-      if (heard) spoken.push(reply.text);
+      if (heard) {
+        this.pending.shift();
+        spoken.push(reply.text);
+        continue;
+      }
+      if (reply.attempts >= MAX_REPLY_ATTEMPTS) this.pending.shift();
+      this.input.gate.hold();
+      break;
     }
     return spoken;
   }

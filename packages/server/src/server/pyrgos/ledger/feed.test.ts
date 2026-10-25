@@ -6,6 +6,7 @@ import {
   announceLine,
   createAnnouncer,
   createVoiceSession,
+  HOLD_SECONDS,
   MAX_REPLY_ATTEMPTS,
   ReplyPump,
   ReplyWatcher,
@@ -292,15 +293,20 @@ describe("ReplyPump", () => {
       .fn<(line: string) => Promise<boolean>>()
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
+    let now = 0;
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
-      gate: new TurnGate(),
+      gate: new TurnGate(() => now),
       session,
       speak,
     });
-    // Interrupted: nothing is acked and the pump waits for the next boundary instead of talking over the user.
+    // Interrupted: nothing is acked, and the gate holds so the retry waits for the next boundary.
     expect(await pump.pump()).toEqual([]);
     expect(speak).toHaveBeenCalledTimes(1);
+    now += HOLD_SECONDS * 1000 - 1;
+    expect(await pump.pump()).toEqual([]);
+    expect(speak).toHaveBeenCalledTimes(1);
+    now += 1;
     expect(await pump.pump()).toEqual(["cut off", "after"]);
     expect(speak.mock.calls.map(([line]) => line)).toEqual([
       "The overseer says: cut off",
@@ -318,15 +324,19 @@ describe("ReplyPump", () => {
       `${JSON.stringify({ text: "never heard" })}\n${JSON.stringify({ text: "next" })}\n`,
     );
     const speak = vi.fn(async (line: string) => !line.includes("never heard"));
+    let now = 0;
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
-      gate: new TurnGate(),
+      gate: new TurnGate(() => now),
       session,
       speak,
     });
-    for (let attempt = 1; attempt < MAX_REPLY_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= MAX_REPLY_ATTEMPTS; attempt += 1) {
       expect(await pump.pump()).toEqual([]);
+      now += HOLD_SECONDS * 1000;
     }
+    // The last interruption drops the reply but still ends that drain, so "next" waits for its own boundary.
+    expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS);
     expect(await pump.pump()).toEqual(["next"]);
     expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS + 1);
   });

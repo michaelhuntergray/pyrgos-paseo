@@ -325,7 +325,7 @@ delivery uses a persisted cursor, not memory, and the replies file itself is the
 `seq > ackedSeq` that it has not already delivered this process, in order; B queues them in memory. Replies are spoken in `seq` order, so
 `ackedSeq` is a high-water mark. A reply is acked on _audible completion_: `ttsManager.generateAndWaitForPlayback` resolves `true` only
 when the client confirmed every chunk played (`audio_played`), and `false` when a barge-in or abort cut it off. `ReplyPump` keeps an
-interrupted reply at the head of its queue and re-speaks it at the next turn boundary, up to `MAX_REPLY_ATTEMPTS` (3) tries, then drops
+interrupted reply at the head of its queue, ends that drain, holds the `TurnGate` for `HOLD_SECONDS` (20 s) and re-speaks it at the first idle boundary after the hold, up to `MAX_REPLY_ATTEMPTS` (3) tries, then drops
 it so one reply cannot block the queue (MIC-753 A; this replaces the earlier ack at first `audio_output`, which lost a reply cut off
 before it was heard). Contract: a reply not yet heard is redelivered (no loss); a reply heard to the end is never redelivered (no
 repeat). A crash mid-sentence drops the unspoken remainder of that one reply,
