@@ -222,7 +222,7 @@ describe("ReplyPump", () => {
     await appendFile(session.repliesPath, `${JSON.stringify({ text: "go ahead" })}\n`);
     const gate = new TurnGate();
     gate.set("bot", true);
-    const speak = vi.fn(async () => {});
+    const speak = vi.fn(async () => true);
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
       gate,
@@ -243,8 +243,8 @@ describe("ReplyPump", () => {
     let release: () => void = () => {};
     const speak = vi.fn(
       () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
+        new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
         }),
     );
     const pump = new ReplyPump({
@@ -267,9 +267,9 @@ describe("ReplyPump", () => {
     const session = createVoiceSession({ dir, session: "s6" });
     await appendFile(session.repliesPath, `${JSON.stringify({ text: "retry me" })}\n`);
     const speak = vi
-      .fn<(line: string) => Promise<void>>()
+      .fn<(line: string) => Promise<boolean>>()
       .mockRejectedValueOnce(new Error("tts down"))
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
       gate: new TurnGate(),
@@ -339,5 +339,19 @@ describe("ReplyPump", () => {
     expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS);
     expect(await pump.pump()).toEqual(["next"]);
     expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS + 1);
+  });
+
+  it("does not ack a reply when speak resolves without reporting it was heard", async () => {
+    const session = createVoiceSession({ dir, session: "s9" });
+    await appendFile(session.repliesPath, `${JSON.stringify({ text: "unconfirmed" })}\n`);
+    // An untyped caller that awaits playback but drops the result must not count as heard.
+    const speak = vi.fn(async () => undefined) as unknown as (line: string) => Promise<boolean>;
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(() => 0),
+      session,
+      speak,
+    });
+    expect(await pump.pump()).toEqual([]);
   });
 });

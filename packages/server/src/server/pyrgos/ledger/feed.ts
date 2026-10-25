@@ -223,8 +223,8 @@ export interface ReplyPumpInput {
   watcher: ReplyWatcher;
   gate: TurnGate;
   session: VoiceSession;
-  /** Resolves false when playback was cut off before the user heard it to the end. */
-  speak: (line: string) => Promise<boolean | void>;
+  /** Resolves true once the user heard the line to the end, false when playback was cut off. */
+  speak: (line: string) => Promise<boolean>;
 }
 
 /** Tries per reply, interrupted ones included, before it is dropped so it cannot block the queue. */
@@ -258,7 +258,7 @@ export class ReplyPump {
       // Ack on audible completion, not on first audio: a reply cut off mid-playback stays queued and is
       // re-spoken after the gate's hold window, up to MAX_REPLY_ATTEMPTS. Either way an interruption
       // ends this drain, so nothing else is spoken over the user.
-      const heard = (await this.input.speak(replyLine(reply.text))) !== false;
+      const heard = (await this.input.speak(replyLine(reply.text))) === true;
       if (heard) {
         this.pending.shift();
         spoken.push(reply.text);
