@@ -164,8 +164,9 @@ export async function createPyrgosConversation(
     async handleTranscript(text) {
       const trimmed = text.trim();
       // A transcript means an utterance ended, even one whose VAD events this conversation missed
-      // (it starts on the first transcript, or the stop was lost): hold replies from here.
-      userStopped();
+      // (it starts on the first transcript): hold replies from here. It leaves the user flag alone:
+      // the VAD stop always precedes transcription, so a set flag means a newer utterance is live.
+      gate.hold();
       if (!trimmed) return;
       // Stop the running turn before this transcript becomes the consent text, so the old turn
       // cannot agree an item on the new turn's yes. Only the newest transcript goes on.
