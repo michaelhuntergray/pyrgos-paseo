@@ -450,19 +450,7 @@ describe("LabSTT", () => {
   });
 
   test("an established socket dropping mid-utterance falls back and replays the audio", async () => {
-    const calls: string[] = [];
-    const delegate = {
-      requiredSampleRate: 16000,
-      connect: async () => {},
-      appendPcm16: (c: Buffer) => calls.push(`append${c[0]}`),
-      commit: () => calls.push("commit"),
-      clear: () => {},
-      close: () => {},
-      on: () => undefined,
-    };
-    const fallback = {
-      createSession: () => delegate,
-    } as unknown as SpeechToTextProvider;
+    const { calls, fallback } = recordingFallback();
     const url = await fakeLab(() => {});
     const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
     const session = stt.createSession({ logger });
@@ -587,6 +575,36 @@ describe("LabSTT", () => {
     await expect.poll(() => finals.length).toBe(2);
     expect(committed).toEqual([committed[0], "fb-2"]);
     expect(finals.sort()).toEqual([...committed].sort());
+  });
+
+  test("commits made while the fallback connects stay bounded", async () => {
+    const calls: string[] = [];
+    let connected!: () => void;
+    const delegate = {
+      requiredSampleRate: 16000,
+      connect: () => new Promise<void>((resolve) => (connected = resolve)),
+      appendPcm16: (c: Buffer) => calls.push(`append${c[0]}`),
+      commit: () => calls.push("commit"),
+      clear: () => {},
+      close: () => {},
+      on: () => {},
+    };
+    const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
+    const stt = new LabSTT(
+      { url: await deadUrl(), connectTimeoutMs: 500, fallback, maxPendingCommits: 2 },
+      logger,
+    );
+    const session = stt.createSession({ logger });
+    const connecting = session.connect();
+    await expect.poll(() => connected).toBeTypeOf("function");
+    for (const b of [1, 2, 3, 4, 5]) {
+      session.appendPcm16(Buffer.from([b, 0]));
+      session.commit();
+    }
+    connected();
+    await connecting;
+    // Only the newest maxPendingCommits utterances survive for replay.
+    expect(calls).toEqual(["append4", "commit", "append5", "commit"]);
   });
 
   test("a lab that stops answering commits is dropped and its utterances replayed", async () => {
