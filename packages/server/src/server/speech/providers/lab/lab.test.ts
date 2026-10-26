@@ -643,6 +643,23 @@ describe("LabSTT", () => {
     expect(calls).toEqual(["append2", "commit", "append3"]);
   });
 
+  test("a single chunk over the cap keeps its newest audio for replay", async () => {
+    const { calls, fallback } = recordingFallback();
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback, replayMaxBytes: 4 }, logger);
+    const session = stt.createSession({ logger });
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0, 2, 0, 3, 0]));
+    session.commit();
+    await expect.poll(() => frames).toBe(2);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(2);
+    expect(calls).toEqual(["append2", "commit"]);
+  });
+
   test("a failed clear() replacement socket falls back instead of stranding audio", async () => {
     const calls: string[] = [];
     const delegate = {

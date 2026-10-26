@@ -216,7 +216,7 @@ check(
 const yes = await userSays("Yes.");
 const agreedText = await tool("agree_action").run({ id: draft.id });
 const agreed = ledger.get(draft.id);
-check("spoken yes", /yes/i.test(yes), yes);
+check("spoken yes", normalize(yes) === "yes", yes);
 check("item agreed", agreed.state === "agreed" && !agreed.launchError, agreedText);
 const dispatchArgs = spawned[0]?.args ?? [];
 check(

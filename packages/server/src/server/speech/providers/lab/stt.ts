@@ -130,11 +130,16 @@ export class LabSTT implements SpeechToTextProvider {
           oldest.bytes = 0;
           oldest.dropped = true;
         } else if (utterance.length > 0) {
-          const first = utterance.shift()!;
-          utteranceBytes -= first.length;
-          bufferedBytes -= first.length;
+          // Drop only the excess (whole PCM16 samples), so an oversized chunk keeps its newest audio.
+          const excess = bufferedBytes - replayMaxBytes;
+          const first = utterance[0]!;
+          const cut = Math.min(first.length, excess + (excess % 2));
+          if (cut === first.length) utterance.shift();
+          else utterance[0] = first.subarray(cut);
+          utteranceBytes -= cut;
+          bufferedBytes -= cut;
           logger.warn(
-            { bytes: first.length },
+            { bytes: cut },
             "Lab STT replay buffer full; dropping the start of the current utterance",
           );
         } else {
