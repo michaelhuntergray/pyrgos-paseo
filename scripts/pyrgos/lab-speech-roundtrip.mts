@@ -187,7 +187,10 @@ const userSays = async (text: string): Promise<string> => {
   return latestUserText;
 };
 
-const request = await userSays("Add a README line saying the demo ran.");
+const spokenRequest = "Add a README line saying the demo ran.";
+const request = await userSays(spokenRequest);
+// A mis-heard request must fail here, not flow through the ledger and get launched.
+check("request heard as spoken", normalize(request) === normalize(spokenRequest), request);
 await tool("propose_action").run({ item: request });
 const draft = ledger.list()[0]!;
 check(

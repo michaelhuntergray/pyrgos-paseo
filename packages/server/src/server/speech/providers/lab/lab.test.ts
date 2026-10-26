@@ -536,41 +536,49 @@ describe("LabSTT", () => {
     expect(finals).toEqual(committed);
   });
 
-  test("a commit after fallback replay chains to the replayed lab id, not the fallback id", async () => {
-    const bus = new EventEmitter();
-    let n = 0;
-    const delegate = {
-      requiredSampleRate: 16000,
-      connect: async () => {},
-      appendPcm16: () => {},
-      commit: () => {
-        n += 1;
-        bus.emit("committed", {
-          segmentId: `fb-${n}`,
-          previousSegmentId: n > 1 ? `fb-${n - 1}` : null,
-        });
-      },
-      clear: () => {},
-      close: () => {},
-      on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
-    };
-    const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
-    const url = await fakeLab(() => {});
-    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
-    const session = stt.createSession({ logger });
-    const committed: { segmentId: string; previousSegmentId: string | null }[] = [];
-    session.on("committed", (e) => committed.push(e));
-    await session.connect();
-    session.appendPcm16(Buffer.from([1, 0]));
-    session.commit();
-    for (const s of servers) for (const client of s.clients) client.terminate();
-    await expect.poll(() => n).toBe(1);
-    session.appendPcm16(Buffer.from([2, 0]));
-    session.commit();
-    expect(committed).toHaveLength(2);
-    expect(committed[1]!.previousSegmentId).toBe(committed[0]!.segmentId);
-    expect(committed[1]!.segmentId).toBe("fb-2");
-  });
+  test.each([
+    ["fallback ids", (n: number) => (n > 1 ? `fb-${n - 1}` : null)],
+    ["null", () => null],
+  ])(
+    "commits after fallback replay chain to the announced ids (fallback previous: %s)",
+    async (_label, fbPrevious) => {
+      const bus = new EventEmitter();
+      let n = 0;
+      const delegate = {
+        requiredSampleRate: 16000,
+        connect: async () => {},
+        appendPcm16: () => {},
+        commit: () => {
+          n += 1;
+          bus.emit("committed", {
+            segmentId: `fb-${n}`,
+            previousSegmentId: fbPrevious(n),
+          });
+        },
+        clear: () => {},
+        close: () => {},
+        on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
+      };
+      const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
+      const url = await fakeLab(() => {});
+      const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+      const session = stt.createSession({ logger });
+      const committed: { segmentId: string; previousSegmentId: string | null }[] = [];
+      session.on("committed", (e) => committed.push(e));
+      await session.connect();
+      session.appendPcm16(Buffer.from([1, 0]));
+      session.commit();
+      for (const s of servers) for (const client of s.clients) client.terminate();
+      await expect.poll(() => n).toBe(1);
+      session.appendPcm16(Buffer.from([2, 0]));
+      session.commit();
+      session.appendPcm16(Buffer.from([3, 0]));
+      session.commit();
+      expect(committed.map((c) => c.segmentId).slice(1)).toEqual(["fb-2", "fb-3"]);
+      expect(committed[1]!.previousSegmentId).toBe(committed[0]!.segmentId);
+      expect(committed[2]!.previousSegmentId).toBe("fb-2");
+    },
+  );
 
   test("lab finals are matched to committed utterances in order", async () => {
     const ends: WebSocket[] = [];
