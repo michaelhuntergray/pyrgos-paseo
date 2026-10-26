@@ -478,7 +478,7 @@ describe("LabSTT", () => {
     expect(errors).toEqual([]);
   });
 
-  function recordingFallback() {
+  function recordingFallback({ async = false } = {}) {
     const calls: string[] = [];
     const bus = new EventEmitter();
     let n = 0;
@@ -489,15 +489,13 @@ describe("LabSTT", () => {
       commit: () => {
         calls.push("commit");
         n += 1;
-        bus.emit("committed", {
-          segmentId: `fb-${n}`,
-          previousSegmentId: null,
-        });
-        bus.emit("transcript", {
-          segmentId: `fb-${n}`,
-          transcript: `t${n}`,
-          isFinal: true,
-        });
+        const id = `fb-${n}`;
+        const emit = () => {
+          bus.emit("committed", { segmentId: id, previousSegmentId: null });
+          bus.emit("transcript", { segmentId: id, transcript: `t${id}`, isFinal: true });
+        };
+        if (async) setImmediate(emit);
+        else emit();
       },
       clear: () => {},
       close: () => {},
@@ -534,6 +532,35 @@ describe("LabSTT", () => {
     expect(calls).toEqual(["append1", "commit", "append2", "commit", "append3"]);
     // The replayed commits keep the ids already announced for them.
     expect(finals).toEqual(committed);
+  });
+
+  test("replayed ids survive a fallback that reports commits asynchronously", async () => {
+    const { calls, fallback } = recordingFallback({ async: true });
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    await expect.poll(() => frames).toBe(4);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(4);
+    session.appendPcm16(Buffer.from([3, 0]));
+    session.commit();
+    await expect.poll(() => finals.length).toBe(3);
+    // Replays report under the announced lab ids; the live commit is announced once, with its own id.
+    expect(committed).toHaveLength(3);
+    expect(finals).toEqual(committed);
+    expect(committed[2]).toBe("fb-3");
   });
 
   test.each([

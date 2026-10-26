@@ -115,8 +115,6 @@ export class LabSTT implements SpeechToTextProvider {
     let utteranceBytes = 0;
     let bufferedBytes = 0;
     let failingOver = false;
-    // Segment id the fallback's replayed commit must report under (see startFallback).
-    let replayId: string | null = null;
     const enforceReplayCap = () => {
       while (bufferedBytes > replayMaxBytes) {
         const oldest = committedUtterances.find((u) => !u.dropped);
@@ -268,10 +266,13 @@ export class LabSTT implements SpeechToTextProvider {
       // Each replayed commit was already announced under its lab segment id; keep that id.
       // Later commits chain to the last id callers saw, never to a fallback id they were not told.
       // The fallback's own previousSegmentId is ignored: it may be a fallback id or null.
+      // Fallback commits arrive in order, possibly asynchronously, so replayed ids queue FIFO.
       const idMap = new Map<string, string>();
+      const replayIds: string[] = [];
       let lastAnnounced = previousSegmentId;
       session.on("committed", (p) => {
-        if (replayId !== null) {
+        const replayId = replayIds.shift();
+        if (replayId !== undefined) {
           idMap.set(p.segmentId, replayId);
           return;
         }
@@ -294,9 +295,8 @@ export class LabSTT implements SpeechToTextProvider {
       for (const entry of committedUtterances.splice(0)) {
         if (entry.dropped) continue;
         entry.chunks.forEach(send);
-        replayId = entry.segmentId;
+        replayIds.push(entry.segmentId);
         session.commit();
-        replayId = null;
       }
       utterance.splice(0).forEach(send);
       queued.length = 0;
