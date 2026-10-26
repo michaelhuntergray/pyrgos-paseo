@@ -670,6 +670,27 @@ describe("LabSTT", () => {
     expect(calls).toEqual(["append2", "commit", "append3"]);
   });
 
+  test("audio queued while the socket connects is bounded by the replay cap", async () => {
+    const received: number[] = [];
+    const url = await fakeLab((_ws, data, isBinary) => {
+      received.push(isBinary ? (data as Buffer)[0]! : -1);
+    });
+    const stt = new LabSTT(
+      { url, connectTimeoutMs: 1000, fallback: null, replayMaxBytes: 4 },
+      logger,
+    );
+    const session = stt.createSession({ logger });
+    const connected = session.connect();
+    session.appendPcm16(Buffer.from([1, 0, 1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.appendPcm16(Buffer.from([3, 0]));
+    await connected;
+    // [1,0,1,0] is dropped for space; its end marker still goes, so the lab answers it in order.
+    await expect.poll(() => received).toEqual([-1, 2, 3]);
+    session.close();
+  });
+
   test("a single chunk over the cap keeps its newest audio for replay", async () => {
     const { calls, fallback } = recordingFallback();
     let frames = 0;

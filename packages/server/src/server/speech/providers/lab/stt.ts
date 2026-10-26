@@ -100,6 +100,7 @@ export class LabSTT implements SpeechToTextProvider {
     let previousSegmentId: string | null = null;
     // Frames waiting for the socket, in order; null is a commit's "end".
     const queued: Array<Buffer | null> = [];
+    let queuedBytes = 0;
     let closed = false;
     let pending: WebSocket | null = null;
     // Latest lab open attempt; connect() follows it when clear() aborts the one it started with.
@@ -145,6 +146,25 @@ export class LabSTT implements SpeechToTextProvider {
         }
       }
     };
+    // Audio waiting for the socket shares the replay cap: the oldest queued audio goes first
+    // (whole PCM16 samples); "end" markers stay so the lab still answers each commit in order.
+    const queueAudio = (chunk: Buffer) => {
+      queued.push(chunk);
+      queuedBytes += chunk.length;
+      while (queuedBytes > replayMaxBytes) {
+        const index = queued.findIndex((frame) => frame !== null);
+        const first = queued[index]!;
+        const excess = queuedBytes - replayMaxBytes;
+        const cut = Math.min(first.length, excess + (excess % 2));
+        if (cut === first.length) queued.splice(index, 1);
+        else queued[index] = first.subarray(cut);
+        queuedBytes -= cut;
+      }
+    };
+    const clearQueue = () => {
+      queued.length = 0;
+      queuedBytes = 0;
+    };
     const resetReplay = () => {
       committedUtterances.length = 0;
       utterance = [];
@@ -176,6 +196,7 @@ export class LabSTT implements SpeechToTextProvider {
           opened = true;
           ws = socket;
           // Already recorded for replay when appended/committed; only the wire send is deferred.
+          queuedBytes = 0;
           for (const frame of queued.splice(0)) {
             socket.send(frame ?? JSON.stringify({ type: "end" }));
           }
@@ -299,7 +320,7 @@ export class LabSTT implements SpeechToTextProvider {
         session.commit();
       }
       utterance.splice(0).forEach(send);
-      queued.length = 0;
+      clearQueue();
       resetReplay();
     };
 
@@ -337,7 +358,7 @@ export class LabSTT implements SpeechToTextProvider {
           bufferedBytes += chunk.length;
           enforceReplayCap();
           if (ws && ws.readyState === WebSocket.OPEN) ws.send(chunk);
-          else queued.push(chunk);
+          else queueAudio(chunk);
         }
       },
       commit() {
@@ -364,7 +385,7 @@ export class LabSTT implements SpeechToTextProvider {
         }
       },
       clear() {
-        queued.length = 0;
+        clearQueue();
         resetReplay();
         if (delegate) {
           delegate.clear();
@@ -384,7 +405,7 @@ export class LabSTT implements SpeechToTextProvider {
       },
       close() {
         closed = true;
-        queued.length = 0;
+        clearQueue();
         resetReplay();
         delegate?.close();
         const old = ws;
