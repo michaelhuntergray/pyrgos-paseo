@@ -134,6 +134,21 @@ A formal log of the Pyrgos additions to this fork, in build order. Each entry sa
 - **Consequence:** a reply waits behind the agent's own queued speech rather than interrupting it. The voice session's own `speak` events now share the same queue code.
 - **Status:** verified: `conversation.test.ts` (spoken from the replies file, held after barge-in and re-spoken when cut off, held during a turn) and `voice-session-conversation.test.ts` (port resolves true on `audio_played`, false on barge-in); server typecheck. **Assumed:** a live session on the PC; the persisted reply cursor in DESIGN.md §5 is still an in-memory offset in `ReplyWatcher`, so a daemon restart re-reads the replies file from the start.
 
+## Lab STT replays every unfinalized utterance (MIC-753 D)
+
+- **Decided:** on lab socket loss the fallback gets every committed utterance whose final never arrived, oldest first, then the current audio; each replayed commit keeps the segment id already announced. The buffer is capped (60 s) and drops the oldest committed audio with a logged warning. **Who:** a Codex review (round 6) flagged that only the current utterance was replayed; the overseer assigned it; Claude implemented.
+- **Changed with it:** the segment id now rotates at commit, not at the final, so two commits awaiting finals no longer share an id; the lab's finals are matched to commits in order.
+- **Rejected:** an unbounded buffer (a stuck lab would grow memory); replaying dropped audio from disk (no such store).
+- **Also:** `lab-speech-roundtrip.mts` now covers the voice -> ledger -> delegation steps (stubbed spawn) beside transcription.
+- **Status:** verified: lab provider tests (4 new), server typecheck, and the script run against a fake loopback lab (all checks pass). **Assumed:** a run against the real lab.
+
+## Lab STT failover becomes one ordered outbox (MIC-753 D)
+
+- **Decided:** the four buffers (replay, pre-connect queue, held caller frames, pending commits) plus id bookkeeping in `LabSTT` were replaced by one ordered outbox of audio and commit frames with a send cursor. Frames leave only when a final answers them; a new sink (reopened lab socket, connected fallback) replays from cursor 0; one byte cap evicts the oldest audio (commit frames stay, so evicted audio replays as an empty commit); one commit cap in `commit()` terminates a connected-but-silent lab and fails over, otherwise finalizes the oldest announced commit empty. `commit()` always announces its own id; the fallback's `committed` only maps ids FIFO. **Who:** Codex review patching did not converge (9 rounds, each finding a new edge case in the state machine); the overseer had an Opus architect pass design the outbox; Claude Sonnet implemented it.
+- **Rejected:** a tenth round of patches; keeping the held buffer to order re-entrant commits (the drain loop's re-entrancy guard gives the same order by appending at the tail).
+- **Consequence:** live commits after a failover are now announced under the wrapper's own ids (the old fallback-id announcements are gone); a final with no queued commit ends the current utterance and rotates the id.
+- **Status:** verified: `lab.test.ts` (59 tests, including one per round-9 finding: commit lost while the fallback connects, unbounded pre-connect commits in one synchronous loop, re-entrant commit order audio A, commit A, audio B, commit B; plus replay from the oldest unanswered frame and evicted audio replaying as an empty commit), server typecheck, oxlint. **Assumed:** a fresh Codex or non-Codex review, and the real-lab roundtrip. Known edge not covered: a commit dropped by the commit cap after it was already sent to a connected fallback can leave that fallback's late final to pop a later commit.
+
 ## Open questions
 
 Design and core seams:

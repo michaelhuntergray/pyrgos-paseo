@@ -14,7 +14,18 @@ export interface LabSttOptions {
   connectTimeoutMs: number;
   /** Used when the lab cannot be reached at connect(). */
   fallback: SpeechToTextProvider | null;
+  /** Cap on audio kept for fallback replay (committed-but-unfinalized plus current); default 60 s. */
+  replayMaxBytes?: number;
+  /** Commits the lab may leave unanswered before it is treated as hung and dropped; default 64. */
+  maxPendingCommits?: number;
 }
+
+/** 60 s of 16 kHz mono int16 PCM. */
+const DEFAULT_REPLAY_MAX_BYTES = LAB_STT_SAMPLE_RATE * 2 * 60;
+const DEFAULT_MAX_PENDING_COMMITS = 64;
+
+/** One entry of the ordered outbox: caller audio, or a commit already announced under `segmentId`. */
+type Frame = { kind: "audio"; chunk: Buffer } | { kind: "commit"; segmentId: string };
 
 /** Keeps only well-formed {word,start,end} entries (0 <= start <= end; probability kept only in [0,1]); undefined when none survive. */
 export function parseWords(raw: unknown): WordTimestamp[] | undefined {
@@ -84,20 +95,113 @@ export class LabSTT implements SpeechToTextProvider {
     let delegate: StreamingTranscriptionSession | null = null;
     let segmentId = randomUUID();
     let previousSegmentId: string | null = null;
-    const queued: Buffer[] = [];
     let closed = false;
-    // commit() before the socket is (re)connected: the "end" goes out right after the queued audio.
-    let endPending = false;
     let pending: WebSocket | null = null;
     // Latest lab open attempt; connect() follows it when clear() aborts the one it started with.
     let latest: Promise<void> | null = null;
     let connecting = false;
-    let replayingCommit = false;
-    // Audio of the current utterance already sent to the lab, and whether it was committed:
-    // replayed to the fallback if the lab dies before its final.
-    const utterance: Buffer[] = [];
-    let commitSent = false;
     let failingOver = false;
+
+    // One ordered outbox of everything the caller sent that no final has answered yet: audio and
+    // commit frames in call order. `cursor` is the next frame to send to the current sink; frames
+    // leave only when a final answers them (the lab answers in order), so what remains is exactly
+    // the unanswered commits plus the current uncommitted audio. A new sink replays from cursor 0.
+    // Limit: audio evicted by the byte cap replays as an empty commit (its id still gets a final).
+    const replayMaxBytes = options.replayMaxBytes ?? DEFAULT_REPLAY_MAX_BYTES;
+    const maxPendingCommits = options.maxPendingCommits ?? DEFAULT_MAX_PENDING_COMMITS;
+    const outbox: Frame[] = [];
+    let cursor = 0;
+    let outboxBytes = 0;
+    let commitFrames = 0;
+    let draining = false;
+    // Announced ids of commits sent to the fallback whose "committed" it has not reported yet (FIFO).
+    const fallbackIds: string[] = [];
+
+    const removeAt = (index: number) => {
+      const [frame] = outbox.splice(index, 1);
+      if (frame!.kind === "audio") {
+        outboxBytes -= frame!.chunk.length;
+      } else {
+        commitFrames -= 1;
+        const at = fallbackIds.indexOf(frame!.segmentId);
+        if (at >= 0) fallbackIds.splice(at, 1);
+      }
+      if (index < cursor) cursor -= 1;
+    };
+    // Removes the oldest commit and the audio before it; false if no commit is queued.
+    const popOldestCommit = (): boolean => {
+      const index = outbox.findIndex((f) => f.kind === "commit");
+      if (index < 0) return false;
+      for (let i = 0; i <= index; i++) removeAt(0);
+      return true;
+    };
+    const oldestCommitId = (): string | null => {
+      const frame = outbox.find((f) => f.kind === "commit");
+      return frame && frame.kind === "commit" ? frame.segmentId : null;
+    };
+    // Evict the oldest audio (whole PCM16 samples, copying the tail) over the byte cap; commits stay.
+    const enforceCap = () => {
+      while (outboxBytes > replayMaxBytes) {
+        const index = outbox.findIndex((f) => f.kind === "audio");
+        if (index < 0) return;
+        const frame = outbox[index] as { kind: "audio"; chunk: Buffer };
+        const excess = outboxBytes - replayMaxBytes;
+        const cut = Math.min(frame.chunk.length, excess + (excess % 2));
+        if (cut === frame.chunk.length) {
+          removeAt(index);
+        } else {
+          frame.chunk = Buffer.from(frame.chunk.subarray(cut));
+          outboxBytes -= cut;
+        }
+        logger.warn({ bytes: cut }, "Lab STT outbox full; dropping the oldest audio");
+      }
+    };
+    const resetOutbox = () => {
+      outbox.length = 0;
+      cursor = 0;
+      outboxBytes = 0;
+      commitFrames = 0;
+      fallbackIds.length = 0;
+    };
+    // Send outbox[cursor..] while a sink is ready. A re-entrant call (a listener committing while
+    // we send) returns at once; its frame sits at the tail and is picked up by the running loop.
+    const drain = () => {
+      if (draining) return;
+      draining = true;
+      try {
+        for (;;) {
+          if (closed || cursor >= outbox.length) break;
+          const socket = ws && ws.readyState === WebSocket.OPEN ? ws : null;
+          if (!delegate && !socket) break;
+          const frame = outbox[cursor]!;
+          cursor += 1;
+          if (delegate) {
+            if (frame.kind === "audio") {
+              delegate.appendPcm16(
+                resamplePcm16(frame.chunk, LAB_STT_SAMPLE_RATE, delegate.requiredSampleRate),
+              );
+            } else {
+              fallbackIds.push(frame.segmentId);
+              delegate.commit();
+            }
+          } else if (frame.kind === "audio") {
+            socket!.send(frame.chunk);
+          } else {
+            socket!.send(JSON.stringify({ type: "end" }));
+          }
+        }
+      } finally {
+        draining = false;
+      }
+    };
+    // A final answers the oldest commit; with none queued it ends the current utterance.
+    const answered = () => {
+      if (popOldestCommit()) return;
+      for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i]!.kind === "audio") removeAt(i);
+      previousSegmentId = segmentId;
+      segmentId = randomUUID();
+    };
+
     const aborted = new Error("lab STT connect aborted");
     const dropped = new WeakSet<WebSocket>();
     const abortPending = () => {
@@ -122,14 +226,9 @@ export class LabSTT implements SpeechToTextProvider {
           }
           opened = true;
           ws = socket;
-          for (const chunk of queued.splice(0)) {
-            socket.send(chunk);
-            utterance.push(chunk);
-          }
-          if (endPending) {
-            endPending = false;
-            socket.send(JSON.stringify({ type: "end" }));
-          }
+          // New sink: replay everything unanswered.
+          cursor = 0;
+          drain();
           resolve();
         });
         socket.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
@@ -148,19 +247,15 @@ export class LabSTT implements SpeechToTextProvider {
           if (message.type === "partial" || message.type === "final") {
             const isFinal = message.type === "final";
             const words = parseWords(message.words);
+            // The lab answers in commit order: the oldest committed utterance owns this message.
             emitter.emit("transcript", {
-              segmentId,
+              segmentId: oldestCommitId() ?? segmentId,
               transcript: message.text ?? "",
               isFinal,
               language: params.language,
               ...(words ? { words } : {}),
             });
-            if (isFinal) {
-              utterance.length = 0;
-              commitSent = false;
-              previousSegmentId = segmentId;
-              segmentId = randomUUID();
-            }
+            if (isFinal) answered();
           } else if (message.type === "error") {
             emitter.emit("error", new Error(message.message ?? "lab STT error"));
           }
@@ -181,7 +276,7 @@ export class LabSTT implements SpeechToTextProvider {
       });
 
     // Established lab session died (or the clear() replacement failed): switch to the fallback
-    // and replay the current utterance; with no fallback, surface the error.
+    // and replay the outbox; with no fallback, surface the error.
     const runFailover = async (error: Error): Promise<void> => {
       failingOver = true;
       logger.warn({ err: error }, "Lab STT lost; switching to fallback provider");
@@ -205,32 +300,32 @@ export class LabSTT implements SpeechToTextProvider {
     const startFallback = async (): Promise<void> => {
       if (!options.fallback) throw new Error("lab STT unavailable and no fallback configured");
       const session = options.fallback.createSession(params);
-      // The replayed commit was already announced under the lab segment id; keep that id.
+      // Every commit was already announced under its lab segment id (commit() emits "committed"
+      // itself); the fallback's own "committed" only tells us which fallback id answers which
+      // announced id, FIFO in the order the commits were sent. Its previousSegmentId is ignored.
       const idMap = new Map<string, string>();
       session.on("committed", (p) => {
-        if (replayingCommit) idMap.set(p.segmentId, segmentId);
-        else emitter.emit("committed", p);
+        const announced = fallbackIds.shift();
+        if (announced !== undefined) idMap.set(p.segmentId, announced);
       });
-      session.on("transcript", (p) =>
-        emitter.emit("transcript", {
-          ...p,
-          segmentId: idMap.get(p.segmentId) ?? p.segmentId,
-        }),
-      );
+      session.on("transcript", (p) => {
+        const mapped = idMap.get(p.segmentId) ?? p.segmentId;
+        emitter.emit("transcript", { ...p, segmentId: mapped });
+        if (p.isFinal) {
+          idMap.delete(p.segmentId);
+          answered();
+        }
+      });
       session.on("error", (e) => emitter.emit("error", e));
       await session.connect();
+      if (closed) {
+        session.close();
+        return;
+      }
       delegate = session;
-      for (const chunk of [...utterance.splice(0), ...queued.splice(0)]) {
-        session.appendPcm16(resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, session.requiredSampleRate));
-      }
-      if (endPending || commitSent) {
-        // commit() already emitted "committed" before the lab failed; only replay the end.
-        endPending = false;
-        commitSent = false;
-        replayingCommit = true;
-        session.commit();
-        replayingCommit = false;
-      }
+      // New sink: replay everything unanswered, oldest first.
+      cursor = 0;
+      drain();
     };
 
     return {
@@ -257,35 +352,58 @@ export class LabSTT implements SpeechToTextProvider {
         connecting = false;
       },
       appendPcm16(chunk: Buffer) {
-        if (delegate) {
-          delegate.appendPcm16(
-            resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, delegate.requiredSampleRate),
-          );
-        } else if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk);
-          utterance.push(chunk);
-        } else {
-          queued.push(chunk);
-        }
+        if (closed) return;
+        outbox.push({ kind: "audio", chunk });
+        outboxBytes += chunk.length;
+        enforceCap();
+        drain();
       },
       commit() {
-        if (delegate) {
-          delegate.commit();
-          return;
+        if (closed) return;
+        const id = segmentId;
+        outbox.push({ kind: "commit", segmentId: id });
+        commitFrames += 1;
+        // Next utterance starts now; the committed one keeps its id until its final arrives.
+        const announcedPrevious = previousSegmentId;
+        previousSegmentId = id;
+        segmentId = randomUUID();
+        emitter.emit("committed", { segmentId: id, previousSegmentId: announcedPrevious });
+        if (commitFrames > maxPendingCommits) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            // The lab is up but not answering: drop it and replay from the oldest unanswered frame.
+            logger.warn(
+              { pending: commitFrames },
+              "Lab STT stopped answering commits; dropping it",
+            );
+            const old = ws;
+            ws = null;
+            old.terminate();
+            abortPending();
+            failover(new Error("lab STT stopped answering"));
+          } else {
+            // No sink is answering (connecting or none): the oldest announced id gets an empty final
+            // and its frames go, so no announced id stays silent and the outbox stays bounded.
+            const oldest = oldestCommitId();
+            logger.warn(
+              { segmentId: oldest },
+              "Lab STT has too many unanswered commits; finalizing the oldest empty",
+            );
+            if (oldest !== null) {
+              popOldestCommit();
+              emitter.emit("transcript", {
+                segmentId: oldest,
+                transcript: "",
+                isFinal: true,
+                language: params.language,
+              });
+            }
+          }
         }
-        emitter.emit("committed", { segmentId, previousSegmentId });
-        commitSent = true;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "end" }));
-        } else {
-          endPending = true;
-        }
+        drain();
       },
       clear() {
-        queued.length = 0;
-        utterance.length = 0;
-        commitSent = false;
-        endPending = false;
+        resetOutbox();
+        segmentId = randomUUID();
         if (delegate) {
           delegate.clear();
           return;
@@ -296,7 +414,6 @@ export class LabSTT implements SpeechToTextProvider {
         ws = null;
         old?.terminate();
         abortPending();
-        segmentId = randomUUID();
         const reopen = (latest = openLab());
         reopen.catch((error) => {
           if (!closed && !connecting && error !== aborted) failover(error);
@@ -304,9 +421,7 @@ export class LabSTT implements SpeechToTextProvider {
       },
       close() {
         closed = true;
-        endPending = false;
-        queued.length = 0;
-        utterance.length = 0;
+        resetOutbox();
         delegate?.close();
         const old = ws;
         ws = null;
