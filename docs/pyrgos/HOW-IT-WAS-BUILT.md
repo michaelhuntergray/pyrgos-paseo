@@ -142,6 +142,13 @@ A formal log of the Pyrgos additions to this fork, in build order. Each entry sa
 - **Also:** `lab-speech-roundtrip.mts` now covers the voice -> ledger -> delegation steps (stubbed spawn) beside transcription.
 - **Status:** verified: lab provider tests (4 new), server typecheck, and the script run against a fake loopback lab (all checks pass). **Assumed:** a run against the real lab.
 
+## Lab STT failover becomes one ordered outbox (MIC-753 D)
+
+- **Decided:** the four buffers (replay, pre-connect queue, held caller frames, pending commits) plus id bookkeeping in `LabSTT` were replaced by one ordered outbox of audio and commit frames with a send cursor. Frames leave only when a final answers them; a new sink (reopened lab socket, connected fallback) replays from cursor 0; one byte cap evicts the oldest audio (commit frames stay, so evicted audio replays as an empty commit); one commit cap in `commit()` terminates a connected-but-silent lab and fails over, otherwise finalizes the oldest announced commit empty. `commit()` always announces its own id; the fallback's `committed` only maps ids FIFO. **Who:** Codex review patching did not converge (9 rounds, each finding a new edge case in the state machine); the overseer had an Opus architect pass design the outbox; Claude Sonnet implemented it.
+- **Rejected:** a tenth round of patches; keeping the held buffer to order re-entrant commits (the drain loop's re-entrancy guard gives the same order by appending at the tail).
+- **Consequence:** live commits after a failover are now announced under the wrapper's own ids (the old fallback-id announcements are gone); a final with no queued commit ends the current utterance and rotates the id.
+- **Status:** verified: `lab.test.ts` (59 tests, including one per round-9 finding: commit lost while the fallback connects, unbounded pre-connect commits in one synchronous loop, re-entrant commit order audio A, commit A, audio B, commit B; plus replay from the oldest unanswered frame and evicted audio replaying as an empty commit), server typecheck, oxlint. **Assumed:** a fresh Codex or non-Codex review, and the real-lab roundtrip. Known edge not covered: a commit dropped by the commit cap after it was already sent to a connected fallback can leave that fallback's late final to pop a later commit.
+
 ## Open questions
 
 Design and core seams:

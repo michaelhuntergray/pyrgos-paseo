@@ -548,7 +548,7 @@ describe("LabSTT", () => {
     // Replays report under the announced lab ids; the live commit is announced once, with its own id.
     expect(committed).toHaveLength(3);
     expect(finals).toEqual(committed);
-    expect(committed[2]).toBe("fb-3");
+    expect(committed[2]!.startsWith("fb-")).toBe(false);
   });
 
   test("a live commit reported synchronously is not taken for a delayed replay", async () => {
@@ -573,38 +573,174 @@ describe("LabSTT", () => {
     session.appendPcm16(Buffer.from([2, 0]));
     session.commit();
     await expect.poll(() => finals.length).toBe(2);
-    expect(committed).toEqual([committed[0], "fb-2"]);
+    expect(committed).toHaveLength(2);
+    expect(committed.some((id) => id.startsWith("fb-"))).toBe(false);
     expect(finals.sort()).toEqual([...committed].sort());
   });
 
-  test("commits made while the fallback connects stay bounded", async () => {
+  // Fallback whose connect() stays pending until released; every commit is reported and finalized at once.
+  function gatedFallback(onFinal?: () => void) {
     const calls: string[] = [];
-    let connected!: () => void;
+    const bus = new EventEmitter();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let n = 0;
     const delegate = {
       requiredSampleRate: 16000,
-      connect: () => new Promise<void>((resolve) => (connected = resolve)),
+      connect: () => gate,
       appendPcm16: (c: Buffer) => calls.push(`append${c[0]}`),
-      commit: () => calls.push("commit"),
+      commit: () => {
+        calls.push("commit");
+        n += 1;
+        const id = `fb-${n}`;
+        bus.emit("committed", { segmentId: id, previousSegmentId: null });
+        bus.emit("transcript", { segmentId: id, transcript: `t${id}`, isFinal: true });
+        onFinal?.();
+      },
       clear: () => {},
       close: () => {},
-      on: () => {},
+      on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
     };
     const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
+    return { calls, fallback, release };
+  }
+
+  test("commits past the cap while the fallback connects finalize the oldest empty; the rest replay in order", async () => {
+    const { calls, fallback, release } = gatedFallback();
     const stt = new LabSTT(
       { url: await deadUrl(), connectTimeoutMs: 500, fallback, maxPendingCommits: 2 },
       logger,
     );
     const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: Array<{ id: string; text: string }> = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push({ id: e.segmentId, text: e.transcript }));
     const connecting = session.connect();
-    await expect.poll(() => connected).toBeTypeOf("function");
+    // The lab is dead, so the fallback is being started: no sink answers yet.
+    await new Promise((r) => setTimeout(r, 50));
     for (const b of [1, 2, 3, 4, 5]) {
       session.appendPcm16(Buffer.from([b, 0]));
       session.commit();
     }
-    connected();
+    expect(committed).toHaveLength(5);
+    // The three overflowed commits were finalized empty at once; nothing reached the fallback yet.
+    expect(finals).toEqual(committed.slice(0, 3).map((id) => ({ id, text: "" })));
+    expect(calls).toEqual([]);
+    release();
     await connecting;
-    // Only the newest maxPendingCommits utterances survive for replay.
     expect(calls).toEqual(["append4", "commit", "append5", "commit"]);
+    expect(finals.map((f) => f.id)).toEqual(committed);
+    expect(finals.slice(3).map((f) => f.text)).toEqual(["tfb-1", "tfb-2"]);
+  });
+
+  test("a synchronous loop of commits before connect() resolves stays bounded and every id is finalized", async () => {
+    const { calls, fallback, release } = gatedFallback();
+    const stt = new LabSTT(
+      { url: await deadUrl(), connectTimeoutMs: 500, fallback, maxPendingCommits: 3 },
+      logger,
+    );
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    const connecting = session.connect();
+    await new Promise((r) => setTimeout(r, 50));
+    for (let i = 0; i < 200; i++) {
+      session.appendPcm16(Buffer.from([i % 250, 0]));
+      session.commit();
+    }
+    release();
+    await connecting;
+    // At most maxPendingCommits commits were kept for replay, newest last.
+    expect(calls.filter((c) => c === "commit")).toHaveLength(3);
+    expect(calls.at(-1)).toBe("commit");
+    expect(committed).toHaveLength(200);
+    expect(finals).toEqual(committed);
+  });
+
+  test("a fallback listener that commits during replay never gets a commit before the uncommitted audio", async () => {
+    let session!: ReturnType<LabSTT["createSession"]>;
+    let reentered = false;
+    const { calls, fallback, release } = gatedFallback(() => {
+      if (reentered) return;
+      reentered = true;
+      // Re-entrant commit B, made from inside the fallback's report of commit A.
+      session.commit();
+    });
+    const stt = new LabSTT({ url: await deadUrl(), connectTimeoutMs: 500, fallback }, logger);
+    session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    const connecting = session.connect();
+    await new Promise((r) => setTimeout(r, 50));
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    release();
+    await connecting;
+    expect(calls).toEqual(["append1", "commit", "append2", "commit"]);
+    expect(committed).toHaveLength(2);
+    expect(finals).toEqual(committed);
+  });
+
+  test("replay after lab loss resends only from the oldest unanswered frame", async () => {
+    const { calls, fallback } = recordingFallback();
+    let ends = 0;
+    let frames = 0;
+    const url = await fakeLab((ws, _data, isBinary) => {
+      frames += 1;
+      if (isBinary) return;
+      ends += 1;
+      // The lab answers the first commit only.
+      if (ends === 1) ws.send(JSON.stringify({ type: "final", text: "one" }));
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => e.isFinal && finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    await expect.poll(() => finals.length).toBe(1);
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([3, 0]));
+    await expect.poll(() => frames).toBe(5);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(3);
+    expect(calls).toEqual(["append2", "commit", "append3"]);
+    expect(finals).toEqual([committed[0], committed[1]]);
+  });
+
+  test("audio evicted by the byte cap replays as an empty commit whose id still gets a final", async () => {
+    const { calls, fallback } = recordingFallback();
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback, replayMaxBytes: 4 }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0, 1, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([3, 0]));
+    await expect.poll(() => frames).toBe(5);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(4);
+    expect(calls).toEqual(["commit", "append2", "commit", "append3"]);
+    expect(finals).toEqual(committed);
   });
 
   test("a lab that stops answering commits is dropped and its utterances replayed", async () => {
@@ -621,49 +757,43 @@ describe("LabSTT", () => {
     expect(calls).toEqual(["append1", "commit", "append2", "commit", "append3", "commit"]);
   });
 
-  test.each([
-    ["fallback ids", (n: number) => (n > 1 ? `fb-${n - 1}` : null)],
-    ["null", () => null],
-  ])(
-    "commits after fallback replay chain to the announced ids (fallback previous: %s)",
-    async (_label, fbPrevious) => {
-      const bus = new EventEmitter();
-      let n = 0;
-      const delegate = {
-        requiredSampleRate: 16000,
-        connect: async () => {},
-        appendPcm16: () => {},
-        commit: () => {
-          n += 1;
-          bus.emit("committed", {
-            segmentId: `fb-${n}`,
-            previousSegmentId: fbPrevious(n),
-          });
-        },
-        clear: () => {},
-        close: () => {},
-        on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
-      };
-      const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
-      const url = await fakeLab(() => {});
-      const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
-      const session = stt.createSession({ logger });
-      const committed: { segmentId: string; previousSegmentId: string | null }[] = [];
-      session.on("committed", (e) => committed.push(e));
-      await session.connect();
-      session.appendPcm16(Buffer.from([1, 0]));
-      session.commit();
-      for (const s of servers) for (const client of s.clients) client.terminate();
-      await expect.poll(() => n).toBe(1);
-      session.appendPcm16(Buffer.from([2, 0]));
-      session.commit();
-      session.appendPcm16(Buffer.from([3, 0]));
-      session.commit();
-      expect(committed.map((c) => c.segmentId).slice(1)).toEqual(["fb-2", "fb-3"]);
-      expect(committed[1]!.previousSegmentId).toBe(committed[0]!.segmentId);
-      expect(committed[2]!.previousSegmentId).toBe("fb-2");
-    },
-  );
+  test("commits after fallback replay announce their own ids, chained to the previous announced id", async () => {
+    const bus = new EventEmitter();
+    let n = 0;
+    const delegate = {
+      requiredSampleRate: 16000,
+      connect: async () => {},
+      appendPcm16: () => {},
+      commit: () => {
+        n += 1;
+        bus.emit("committed", { segmentId: `fb-${n}`, previousSegmentId: `fb-${n - 1}` });
+      },
+      clear: () => {},
+      close: () => {},
+      on: (event: string, handler: (...args: unknown[]) => void) => bus.on(event, handler),
+    };
+    const fallback = { createSession: () => delegate } as unknown as SpeechToTextProvider;
+    const url = await fakeLab(() => {});
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const committed: { segmentId: string; previousSegmentId: string | null }[] = [];
+    session.on("committed", (e) => committed.push(e));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => n).toBe(1);
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    session.appendPcm16(Buffer.from([3, 0]));
+    session.commit();
+    // The wrapper announces every commit itself; the fallback's own ids never reach the caller.
+    expect(committed).toHaveLength(3);
+    expect(committed.some((c) => c.segmentId.startsWith("fb-"))).toBe(false);
+    expect(committed[0]!.previousSegmentId).toBeNull();
+    expect(committed[1]!.previousSegmentId).toBe(committed[0]!.segmentId);
+    expect(committed[2]!.previousSegmentId).toBe(committed[1]!.segmentId);
+  });
 
   test("lab finals are matched to committed utterances in order", async () => {
     const ends: WebSocket[] = [];

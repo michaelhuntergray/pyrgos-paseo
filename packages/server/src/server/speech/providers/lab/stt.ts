@@ -24,14 +24,8 @@ export interface LabSttOptions {
 const DEFAULT_REPLAY_MAX_BYTES = LAB_STT_SAMPLE_RATE * 2 * 60;
 const DEFAULT_MAX_PENDING_COMMITS = 64;
 
-/** An utterance committed to the lab whose final transcript has not arrived yet. */
-interface CommittedUtterance {
-  segmentId: string;
-  chunks: Buffer[];
-  bytes: number;
-  /** Audio evicted by the replay cap; the lab may still answer it, the fallback cannot. */
-  dropped: boolean;
-}
+/** One entry of the ordered outbox: caller audio, or a commit already announced under `segmentId`. */
+type Frame = { kind: "audio"; chunk: Buffer } | { kind: "commit"; segmentId: string };
 
 /** Keeps only well-formed {word,start,end} entries (0 <= start <= end; probability kept only in [0,1]); undefined when none survive. */
 export function parseWords(raw: unknown): WordTimestamp[] | undefined {
@@ -101,83 +95,113 @@ export class LabSTT implements SpeechToTextProvider {
     let delegate: StreamingTranscriptionSession | null = null;
     let segmentId = randomUUID();
     let previousSegmentId: string | null = null;
-    // Frames waiting for the socket, in order; null is a commit's "end".
-    const queued: Array<Buffer | null> = [];
-    let queuedBytes = 0;
     let closed = false;
     let pending: WebSocket | null = null;
     // Latest lab open attempt; connect() follows it when clear() aborts the one it started with.
     let latest: Promise<void> | null = null;
     let connecting = false;
-    // Audio the lab has not finalized, replayed to the fallback if it dies first: every committed
-    // utterance awaiting its final (oldest first; the lab answers in order) plus the current,
-    // uncommitted one. Bounded by replayMaxBytes; the oldest committed audio is evicted first.
-    // Limit: an evicted utterance (and any audio the fallback never saw) gets no fallback transcript.
+    let failingOver = false;
+
+    // One ordered outbox of everything the caller sent that no final has answered yet: audio and
+    // commit frames in call order. `cursor` is the next frame to send to the current sink; frames
+    // leave only when a final answers them (the lab answers in order), so what remains is exactly
+    // the unanswered commits plus the current uncommitted audio. A new sink replays from cursor 0.
+    // Limit: audio evicted by the byte cap replays as an empty commit (its id still gets a final).
     const replayMaxBytes = options.replayMaxBytes ?? DEFAULT_REPLAY_MAX_BYTES;
     const maxPendingCommits = options.maxPendingCommits ?? DEFAULT_MAX_PENDING_COMMITS;
-    const committedUtterances: CommittedUtterance[] = [];
-    let utterance: Buffer[] = [];
-    let utteranceBytes = 0;
-    let bufferedBytes = 0;
-    let failingOver = false;
-    // Set once the lab is abandoned for the fallback: commits no longer wait on a lab answer.
-    let fallingBack = false;
-    const enforceReplayCap = () => {
-      while (bufferedBytes > replayMaxBytes) {
-        const oldest = committedUtterances.find((u) => !u.dropped);
-        if (oldest) {
-          bufferedBytes -= oldest.bytes;
-          logger.warn(
-            { segmentId: oldest.segmentId, bytes: oldest.bytes },
-            "Lab STT replay buffer full; dropping committed audio that cannot be replayed",
-          );
-          oldest.chunks = [];
-          oldest.bytes = 0;
-          oldest.dropped = true;
-        } else if (utterance.length > 0) {
-          // Drop only the excess (whole PCM16 samples), so an oversized chunk keeps its newest audio.
-          const excess = bufferedBytes - replayMaxBytes;
-          const first = utterance[0]!;
-          const cut = Math.min(first.length, excess + (excess % 2));
-          if (cut === first.length) utterance.shift();
-          // Copy the tail so the evicted head's backing memory is released.
-          else utterance[0] = Buffer.from(first.subarray(cut));
-          utteranceBytes -= cut;
-          bufferedBytes -= cut;
-          logger.warn(
-            { bytes: cut },
-            "Lab STT replay buffer full; dropping the start of the current utterance",
-          );
+    const outbox: Frame[] = [];
+    let cursor = 0;
+    let outboxBytes = 0;
+    let commitFrames = 0;
+    let draining = false;
+    // Announced ids of commits sent to the fallback whose "committed" it has not reported yet (FIFO).
+    const fallbackIds: string[] = [];
+
+    const removeAt = (index: number) => {
+      const [frame] = outbox.splice(index, 1);
+      if (frame!.kind === "audio") {
+        outboxBytes -= frame!.chunk.length;
+      } else {
+        commitFrames -= 1;
+        const at = fallbackIds.indexOf(frame!.segmentId);
+        if (at >= 0) fallbackIds.splice(at, 1);
+      }
+      if (index < cursor) cursor -= 1;
+    };
+    // Removes the oldest commit and the audio before it; false if no commit is queued.
+    const popOldestCommit = (): boolean => {
+      const index = outbox.findIndex((f) => f.kind === "commit");
+      if (index < 0) return false;
+      for (let i = 0; i <= index; i++) removeAt(0);
+      return true;
+    };
+    const oldestCommitId = (): string | null => {
+      const frame = outbox.find((f) => f.kind === "commit");
+      return frame && frame.kind === "commit" ? frame.segmentId : null;
+    };
+    // Evict the oldest audio (whole PCM16 samples, copying the tail) over the byte cap; commits stay.
+    const enforceCap = () => {
+      while (outboxBytes > replayMaxBytes) {
+        const index = outbox.findIndex((f) => f.kind === "audio");
+        if (index < 0) return;
+        const frame = outbox[index] as { kind: "audio"; chunk: Buffer };
+        const excess = outboxBytes - replayMaxBytes;
+        const cut = Math.min(frame.chunk.length, excess + (excess % 2));
+        if (cut === frame.chunk.length) {
+          removeAt(index);
         } else {
-          return;
+          frame.chunk = Buffer.from(frame.chunk.subarray(cut));
+          outboxBytes -= cut;
         }
+        logger.warn({ bytes: cut }, "Lab STT outbox full; dropping the oldest audio");
       }
     };
-    // Audio waiting for the socket shares the replay cap: the oldest queued audio goes first
-    // (whole PCM16 samples); "end" markers stay so the lab still answers each commit in order.
-    const queueAudio = (chunk: Buffer) => {
-      queued.push(chunk);
-      queuedBytes += chunk.length;
-      while (queuedBytes > replayMaxBytes) {
-        const index = queued.findIndex((frame) => frame !== null);
-        const first = queued[index]!;
-        const excess = queuedBytes - replayMaxBytes;
-        const cut = Math.min(first.length, excess + (excess % 2));
-        if (cut === first.length) queued.splice(index, 1);
-        else queued[index] = Buffer.from(first.subarray(cut));
-        queuedBytes -= cut;
+    const resetOutbox = () => {
+      outbox.length = 0;
+      cursor = 0;
+      outboxBytes = 0;
+      commitFrames = 0;
+      fallbackIds.length = 0;
+    };
+    // Send outbox[cursor..] while a sink is ready. A re-entrant call (a listener committing while
+    // we send) returns at once; its frame sits at the tail and is picked up by the running loop.
+    const drain = () => {
+      if (draining) return;
+      draining = true;
+      try {
+        for (;;) {
+          if (closed || cursor >= outbox.length) break;
+          const socket = ws && ws.readyState === WebSocket.OPEN ? ws : null;
+          if (!delegate && !socket) break;
+          const frame = outbox[cursor]!;
+          cursor += 1;
+          if (delegate) {
+            if (frame.kind === "audio") {
+              delegate.appendPcm16(
+                resamplePcm16(frame.chunk, LAB_STT_SAMPLE_RATE, delegate.requiredSampleRate),
+              );
+            } else {
+              fallbackIds.push(frame.segmentId);
+              delegate.commit();
+            }
+          } else if (frame.kind === "audio") {
+            socket!.send(frame.chunk);
+          } else {
+            socket!.send(JSON.stringify({ type: "end" }));
+          }
+        }
+      } finally {
+        draining = false;
       }
     };
-    const clearQueue = () => {
-      queued.length = 0;
-      queuedBytes = 0;
+    // A final answers the oldest commit; with none queued it ends the current utterance.
+    const answered = () => {
+      if (popOldestCommit()) return;
+      for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i]!.kind === "audio") removeAt(i);
+      previousSegmentId = segmentId;
+      segmentId = randomUUID();
     };
-    const resetReplay = () => {
-      committedUtterances.length = 0;
-      utterance = [];
-      utteranceBytes = 0;
-      bufferedBytes = 0;
-    };
+
     const aborted = new Error("lab STT connect aborted");
     const dropped = new WeakSet<WebSocket>();
     const abortPending = () => {
@@ -202,11 +226,9 @@ export class LabSTT implements SpeechToTextProvider {
           }
           opened = true;
           ws = socket;
-          // Already recorded for replay when appended/committed; only the wire send is deferred.
-          queuedBytes = 0;
-          for (const frame of queued.splice(0)) {
-            socket.send(frame ?? JSON.stringify({ type: "end" }));
-          }
+          // New sink: replay everything unanswered.
+          cursor = 0;
+          drain();
           resolve();
         });
         socket.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
@@ -226,27 +248,14 @@ export class LabSTT implements SpeechToTextProvider {
             const isFinal = message.type === "final";
             const words = parseWords(message.words);
             // The lab answers in commit order: the oldest committed utterance owns this message.
-            const owner = committedUtterances[0];
             emitter.emit("transcript", {
-              segmentId: owner?.segmentId ?? segmentId,
+              segmentId: oldestCommitId() ?? segmentId,
               transcript: message.text ?? "",
               isFinal,
               language: params.language,
               ...(words ? { words } : {}),
             });
-            if (isFinal) {
-              if (owner) {
-                committedUtterances.shift();
-                bufferedBytes -= owner.bytes;
-              } else {
-                // Final with no commit: the lab ended the current utterance itself.
-                bufferedBytes -= utteranceBytes;
-                utterance = [];
-                utteranceBytes = 0;
-                previousSegmentId = segmentId;
-                segmentId = randomUUID();
-              }
-            }
+            if (isFinal) answered();
           } else if (message.type === "error") {
             emitter.emit("error", new Error(message.message ?? "lab STT error"));
           }
@@ -267,7 +276,7 @@ export class LabSTT implements SpeechToTextProvider {
       });
 
     // Established lab session died (or the clear() replacement failed): switch to the fallback
-    // and replay the current utterance; with no fallback, surface the error.
+    // and replay the outbox; with no fallback, surface the error.
     const runFailover = async (error: Error): Promise<void> => {
       failingOver = true;
       logger.warn({ err: error }, "Lab STT lost; switching to fallback provider");
@@ -291,105 +300,32 @@ export class LabSTT implements SpeechToTextProvider {
     const startFallback = async (): Promise<void> => {
       if (!options.fallback) throw new Error("lab STT unavailable and no fallback configured");
       const session = options.fallback.createSession(params);
-      // Each replayed commit was already announced under its lab segment id; keep that id.
-      // Later commits chain to the last id callers saw, never to a fallback id they were not told.
-      // The fallback's own previousSegmentId is ignored: it may be a fallback id or null.
-      // Replayed commits may be reported asynchronously, so their ids queue FIFO, and the caller's
-      // own audio and commits are held (see hold) until every replay has been reported: a live
-      // commit can then never be reported first and take a replay's id.
+      // Every commit was already announced under its lab segment id (commit() emits "committed"
+      // itself); the fallback's own "committed" only tells us which fallback id answers which
+      // announced id, FIFO in the order the commits were sent. Its previousSegmentId is ignored.
       const idMap = new Map<string, string>();
-      const replayIds: string[] = [];
-      let lastAnnounced = previousSegmentId;
-      const send = (chunk: Buffer) =>
-        session.appendPcm16(resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, session.requiredSampleRate));
-      const release = () => {
-        const frames = held;
-        held = null;
-        heldBytes = 0;
-        heldCommits = 0;
-        for (const frame of frames ?? []) {
-          if (frame) send(frame);
-          else session.commit();
-        }
-      };
-      giveUpWaiting = () => {
-        logger.warn(
-          { pending: replayIds.length },
-          "Lab STT fallback has not reported its replayed commits; releasing held audio",
-        );
-        replayIds.length = 0;
-        release();
-      };
       session.on("committed", (p) => {
-        const replayId = replayIds.shift();
-        if (replayId !== undefined) {
-          idMap.set(p.segmentId, replayId);
-          if (replayIds.length === 0) release();
-          return;
+        const announced = fallbackIds.shift();
+        if (announced !== undefined) idMap.set(p.segmentId, announced);
+      });
+      session.on("transcript", (p) => {
+        const mapped = idMap.get(p.segmentId) ?? p.segmentId;
+        emitter.emit("transcript", { ...p, segmentId: mapped });
+        if (p.isFinal) {
+          idMap.delete(p.segmentId);
+          answered();
         }
-        emitter.emit("committed", { ...p, previousSegmentId: lastAnnounced });
-        lastAnnounced = p.segmentId;
       });
-      session.on("transcript", (p) =>
-        emitter.emit("transcript", {
-          ...p,
-          segmentId: idMap.get(p.segmentId) ?? p.segmentId,
-        }),
-      );
-      session.on("error", (e) => {
-        // A failed commit is never reported, so don't keep holding the caller's audio for it.
-        if (replayIds.length > 0) giveUpWaiting();
-        emitter.emit("error", e);
-      });
-      fallingBack = true;
-      try {
-        await session.connect();
-      } finally {
-        fallingBack = false;
-      }
-      delegate = session;
-      held = [];
-      // Committed utterances first, oldest first, each replayed with its commit (commit() already
-      // emitted "committed" before the lab failed); then the current, uncommitted audio.
-      // All ids queue before the first commit, so a synchronous report can't empty the queue early.
-      // A dropped utterance is still committed (with no audio), so its announced id gets a final.
-      const replays = committedUtterances.splice(0);
-      replayIds.push(...replays.map((entry) => entry.segmentId));
-      for (const entry of replays) {
-        entry.chunks.forEach(send);
-        session.commit();
-      }
-      utterance.splice(0).forEach(send);
-      clearQueue();
-      resetReplay();
-      if (replayIds.length === 0) release();
-    };
-
-    // While the fallback has replayed commits it has not reported yet, the caller's audio and
-    // commits wait here (null is a commit), bounded like the other buffers: the oldest audio is
-    // dropped first, and past maxPendingCommits held commits the wait is abandoned (a late replay
-    // is then announced under its fallback id).
-    let held: Array<Buffer | null> | null = null;
-    let heldBytes = 0;
-    let heldCommits = 0;
-    let giveUpWaiting = () => {};
-    const hold = (frame: Buffer | null) => {
-      held!.push(frame);
-      if (frame === null) {
-        heldCommits += 1;
-        if (heldCommits > maxPendingCommits) giveUpWaiting();
+      session.on("error", (e) => emitter.emit("error", e));
+      await session.connect();
+      if (closed) {
+        session.close();
         return;
       }
-      heldBytes += frame.length;
-      while (heldBytes > replayMaxBytes) {
-        const index = held!.findIndex((f) => f !== null);
-        const first = held![index]!;
-        const excess = heldBytes - replayMaxBytes;
-        const cut = Math.min(first.length, excess + (excess % 2));
-        if (cut === first.length) held!.splice(index, 1);
-        else held![index] = Buffer.from(first.subarray(cut));
-        heldBytes -= cut;
-      }
+      delegate = session;
+      // New sink: replay everything unanswered, oldest first.
+      cursor = 0;
+      drain();
     };
 
     return {
@@ -416,80 +352,59 @@ export class LabSTT implements SpeechToTextProvider {
         connecting = false;
       },
       appendPcm16(chunk: Buffer) {
-        if (held) {
-          hold(chunk);
-        } else if (delegate) {
-          delegate.appendPcm16(
-            resamplePcm16(chunk, LAB_STT_SAMPLE_RATE, delegate.requiredSampleRate),
-          );
-        } else {
-          utterance.push(chunk);
-          utteranceBytes += chunk.length;
-          bufferedBytes += chunk.length;
-          enforceReplayCap();
-          if (ws && ws.readyState === WebSocket.OPEN) ws.send(chunk);
-          else queueAudio(chunk);
-        }
+        if (closed) return;
+        outbox.push({ kind: "audio", chunk });
+        outboxBytes += chunk.length;
+        enforceCap();
+        drain();
       },
       commit() {
-        if (held) {
-          hold(null);
-          return;
-        }
-        if (delegate) {
-          delegate.commit();
-          return;
-        }
-        emitter.emit("committed", { segmentId, previousSegmentId });
-        committedUtterances.push({
-          segmentId,
-          chunks: utterance,
-          bytes: utteranceBytes,
-          dropped: false,
-        });
-        utterance = [];
-        utteranceBytes = 0;
+        if (closed) return;
+        const id = segmentId;
+        outbox.push({ kind: "commit", segmentId: id });
+        commitFrames += 1;
         // Next utterance starts now; the committed one keeps its id until its final arrives.
-        previousSegmentId = segmentId;
+        const announcedPrevious = previousSegmentId;
+        previousSegmentId = id;
         segmentId = randomUUID();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "end" }));
-        } else if (!fallingBack) {
-          queued.push(null);
+        emitter.emit("committed", { segmentId: id, previousSegmentId: announcedPrevious });
+        if (commitFrames > maxPendingCommits) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            // The lab is up but not answering: drop it and replay from the oldest unanswered frame.
+            logger.warn(
+              { pending: commitFrames },
+              "Lab STT stopped answering commits; dropping it",
+            );
+            const old = ws;
+            ws = null;
+            old.terminate();
+            abortPending();
+            failover(new Error("lab STT stopped answering"));
+          } else {
+            // No sink is answering (connecting or none): the oldest announced id gets an empty final
+            // and its frames go, so no announced id stays silent and the outbox stays bounded.
+            const oldest = oldestCommitId();
+            logger.warn(
+              { segmentId: oldest },
+              "Lab STT has too many unanswered commits; finalizing the oldest empty",
+            );
+            if (oldest !== null) {
+              popOldestCommit();
+              emitter.emit("transcript", {
+                segmentId: oldest,
+                transcript: "",
+                isFinal: true,
+                language: params.language,
+              });
+            }
+          }
         }
-        // Each unanswered commit keeps an entry (and, before open, an end marker); a lab that
-        // stops answering is dropped so they stay bounded, and its utterances are replayed.
-        // While the fallback connects no lab answer is awaited, so the oldest entry just goes.
-        if (fallingBack && committedUtterances.length > maxPendingCommits) {
-          const oldest = committedUtterances.shift()!;
-          bufferedBytes -= oldest.bytes;
-          logger.warn(
-            { segmentId: oldest.segmentId },
-            "Lab STT fallback still connecting; dropping the oldest utterance awaiting replay",
-          );
-        } else if (committedUtterances.length > maxPendingCommits) {
-          logger.warn(
-            { pending: committedUtterances.length },
-            "Lab STT stopped answering commits; dropping it",
-          );
-          const old = ws;
-          ws = null;
-          old?.terminate();
-          abortPending();
-          // A first connect() still in flight starts the fallback itself when its attempt aborts.
-          if (old || !connecting) failover(new Error("lab STT stopped answering"));
-        }
+        drain();
       },
       clear() {
-        clearQueue();
-        resetReplay();
+        resetOutbox();
+        segmentId = randomUUID();
         if (delegate) {
-          // Held caller audio is cleared too; replays still pending keep the hold open.
-          if (held) {
-            held.length = 0;
-            heldBytes = 0;
-            heldCommits = 0;
-          }
           delegate.clear();
           return;
         }
@@ -499,7 +414,6 @@ export class LabSTT implements SpeechToTextProvider {
         ws = null;
         old?.terminate();
         abortPending();
-        segmentId = randomUUID();
         const reopen = (latest = openLab());
         reopen.catch((error) => {
           if (!closed && !connecting && error !== aborted) failover(error);
@@ -507,9 +421,7 @@ export class LabSTT implements SpeechToTextProvider {
       },
       close() {
         closed = true;
-        clearQueue();
-        resetReplay();
-        held = null;
+        resetOutbox();
         delegate?.close();
         const old = ws;
         ws = null;
