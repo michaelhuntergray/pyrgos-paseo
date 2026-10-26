@@ -16,10 +16,13 @@ export interface LabSttOptions {
   fallback: SpeechToTextProvider | null;
   /** Cap on audio kept for fallback replay (committed-but-unfinalized plus current); default 60 s. */
   replayMaxBytes?: number;
+  /** Commits the lab may leave unanswered before it is treated as hung and dropped; default 64. */
+  maxPendingCommits?: number;
 }
 
 /** 60 s of 16 kHz mono int16 PCM. */
 const DEFAULT_REPLAY_MAX_BYTES = LAB_STT_SAMPLE_RATE * 2 * 60;
+const DEFAULT_MAX_PENDING_COMMITS = 64;
 
 /** An utterance committed to the lab whose final transcript has not arrived yet. */
 interface CommittedUtterance {
@@ -111,11 +114,14 @@ export class LabSTT implements SpeechToTextProvider {
     // uncommitted one. Bounded by replayMaxBytes; the oldest committed audio is evicted first.
     // Limit: an evicted utterance (and any audio the fallback never saw) gets no fallback transcript.
     const replayMaxBytes = options.replayMaxBytes ?? DEFAULT_REPLAY_MAX_BYTES;
+    const maxPendingCommits = options.maxPendingCommits ?? DEFAULT_MAX_PENDING_COMMITS;
     const committedUtterances: CommittedUtterance[] = [];
     let utterance: Buffer[] = [];
     let utteranceBytes = 0;
     let bufferedBytes = 0;
     let failingOver = false;
+    // True while a caller's commit() runs on the fallback: a "committed" it emits then is live.
+    let liveCommit = false;
     const enforceReplayCap = () => {
       while (bufferedBytes > replayMaxBytes) {
         const oldest = committedUtterances.find((u) => !u.dropped);
@@ -134,7 +140,8 @@ export class LabSTT implements SpeechToTextProvider {
           const first = utterance[0]!;
           const cut = Math.min(first.length, excess + (excess % 2));
           if (cut === first.length) utterance.shift();
-          else utterance[0] = first.subarray(cut);
+          // Copy the tail so the evicted head's backing memory is released.
+          else utterance[0] = Buffer.from(first.subarray(cut));
           utteranceBytes -= cut;
           bufferedBytes -= cut;
           logger.warn(
@@ -157,7 +164,7 @@ export class LabSTT implements SpeechToTextProvider {
         const excess = queuedBytes - replayMaxBytes;
         const cut = Math.min(first.length, excess + (excess % 2));
         if (cut === first.length) queued.splice(index, 1);
-        else queued[index] = first.subarray(cut);
+        else queued[index] = Buffer.from(first.subarray(cut));
         queuedBytes -= cut;
       }
     };
@@ -287,12 +294,13 @@ export class LabSTT implements SpeechToTextProvider {
       // Each replayed commit was already announced under its lab segment id; keep that id.
       // Later commits chain to the last id callers saw, never to a fallback id they were not told.
       // The fallback's own previousSegmentId is ignored: it may be a fallback id or null.
-      // Fallback commits arrive in order, possibly asynchronously, so replayed ids queue FIFO.
+      // Replayed commits may be reported asynchronously, so their ids queue FIFO; one reported
+      // synchronously inside a caller's commit() is that live commit, even with replays pending.
       const idMap = new Map<string, string>();
       const replayIds: string[] = [];
       let lastAnnounced = previousSegmentId;
       session.on("committed", (p) => {
-        const replayId = replayIds.shift();
+        const replayId = liveCommit ? undefined : replayIds.shift();
         if (replayId !== undefined) {
           idMap.set(p.segmentId, replayId);
           return;
@@ -363,7 +371,12 @@ export class LabSTT implements SpeechToTextProvider {
       },
       commit() {
         if (delegate) {
-          delegate.commit();
+          liveCommit = true;
+          try {
+            delegate.commit();
+          } finally {
+            liveCommit = false;
+          }
           return;
         }
         emitter.emit("committed", { segmentId, previousSegmentId });
@@ -382,6 +395,20 @@ export class LabSTT implements SpeechToTextProvider {
           ws.send(JSON.stringify({ type: "end" }));
         } else {
           queued.push(null);
+        }
+        // Each unanswered commit keeps an entry (and, before open, an end marker); a lab that
+        // stops answering is dropped so they stay bounded, and its utterances are replayed.
+        if (committedUtterances.length > maxPendingCommits) {
+          logger.warn(
+            { pending: committedUtterances.length },
+            "Lab STT stopped answering commits; dropping it",
+          );
+          const old = ws;
+          ws = null;
+          old?.terminate();
+          abortPending();
+          // A first connect() still in flight starts the fallback itself when its attempt aborts.
+          if (old || !connecting) failover(new Error("lab STT stopped answering"));
         }
       },
       clear() {

@@ -478,7 +478,7 @@ describe("LabSTT", () => {
     expect(errors).toEqual([]);
   });
 
-  function recordingFallback({ async = false } = {}) {
+  function recordingFallback({ async = false as boolean | ((n: number) => boolean) } = {}) {
     const calls: string[] = [];
     const bus = new EventEmitter();
     let n = 0;
@@ -494,7 +494,7 @@ describe("LabSTT", () => {
           bus.emit("committed", { segmentId: id, previousSegmentId: null });
           bus.emit("transcript", { segmentId: id, transcript: `t${id}`, isFinal: true });
         };
-        if (async) setImmediate(emit);
+        if (typeof async === "function" ? async(n) : async) setImmediate(emit);
         else emit();
       },
       clear: () => {},
@@ -561,6 +561,46 @@ describe("LabSTT", () => {
     expect(committed).toHaveLength(3);
     expect(finals).toEqual(committed);
     expect(committed[2]).toBe("fb-3");
+  });
+
+  test("a live commit reported synchronously is not taken for a delayed replay", async () => {
+    // fb-1 is the replay (reported late); fb-2 is the caller's live commit (reported at once).
+    const { calls, fallback } = recordingFallback({ async: (n) => n === 1 });
+    let frames = 0;
+    const url = await fakeLab(() => {
+      frames += 1;
+    });
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback }, logger);
+    const session = stt.createSession({ logger });
+    const committed: string[] = [];
+    const finals: string[] = [];
+    session.on("committed", (e) => committed.push(e.segmentId));
+    session.on("transcript", (e) => finals.push(e.segmentId));
+    await session.connect();
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    await expect.poll(() => frames).toBe(2);
+    for (const s of servers) for (const client of s.clients) client.terminate();
+    await expect.poll(() => calls.length).toBe(2);
+    session.appendPcm16(Buffer.from([2, 0]));
+    session.commit();
+    await expect.poll(() => finals.length).toBe(2);
+    expect(committed).toEqual([committed[0], "fb-2"]);
+    expect(finals.sort()).toEqual([...committed].sort());
+  });
+
+  test("a lab that stops answering commits is dropped and its utterances replayed", async () => {
+    const { calls, fallback } = recordingFallback();
+    const url = await fakeLab(() => {});
+    const stt = new LabSTT({ url, connectTimeoutMs: 1000, fallback, maxPendingCommits: 2 }, logger);
+    const session = stt.createSession({ logger });
+    await session.connect();
+    for (const b of [1, 2, 3]) {
+      session.appendPcm16(Buffer.from([b, 0]));
+      session.commit();
+    }
+    await expect.poll(() => calls.length).toBe(6);
+    expect(calls).toEqual(["append1", "commit", "append2", "commit", "append3", "commit"]);
   });
 
   test.each([
