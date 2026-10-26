@@ -724,8 +724,9 @@ describe("LabSTT", () => {
     session.appendPcm16(Buffer.from([3, 0]));
     await expect.poll(() => frames).toBe(5);
     for (const s of servers) for (const client of s.clients) client.terminate();
-    await expect.poll(() => calls.length).toBe(3);
-    expect(calls).toEqual(["append2", "commit", "append3"]);
+    await expect.poll(() => calls.length).toBe(4);
+    // The dropped utterance is still committed (no audio), so its announced id gets a final.
+    expect(calls).toEqual(["commit", "append2", "commit", "append3"]);
   });
 
   test("audio queued while the socket connects is bounded by the replay cap", async () => {

@@ -352,7 +352,8 @@ export class LabSTT implements SpeechToTextProvider {
       // Committed utterances first, oldest first, each replayed with its commit (commit() already
       // emitted "committed" before the lab failed); then the current, uncommitted audio.
       // All ids queue before the first commit, so a synchronous report can't empty the queue early.
-      const replays = committedUtterances.splice(0).filter((entry) => !entry.dropped);
+      // A dropped utterance is still committed (with no audio), so its announced id gets a final.
+      const replays = committedUtterances.splice(0);
       replayIds.push(...replays.map((entry) => entry.segmentId));
       for (const entry of replays) {
         entry.chunks.forEach(send);
