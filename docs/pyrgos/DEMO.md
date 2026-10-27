@@ -52,6 +52,8 @@ The ledger panel ("Action items") comes from `plugin-examples/pyrgos-action-ledg
 
 4. Voice path with the real brain (several text turns through the object the voice session uses): `ALCHEMIST_HARNESS=... ALCHEMIST_WORKSHOP=... PYRGOS_DISPATCH_CMD=<harness>/tools/dispatch/linux/dispatch.sh PYRGOS_DISPATCH_EXTRA_ARGS="--dry-run --test none" npx tsx scripts/pyrgos-conversation-ledger.ts "<ask with scope, project, done criteria>" "Yes, go ahead." --model haiku`. Exit 0 when the item ends `agreed` with no `launchError`. The announce line is printed, not sent.
 
+On Windows, set `PYRGOS_DISPATCH_CMD=<harness>\tools\dispatch\dispatch.ps1` and `PYRGOS_DISPATCH_EXTRA_ARGS="-DryRun -Test none"` for a dry run.
+
 ## Live voice conversation
 
 In the daemon, a final transcript goes to the conversation agent (not a Paseo agent), unless `PYRGOS_VOICE_CONVERSATION=0`. Voice mode still needs an agent selected in the app; that agent is not used for spoken turns. Set for real delegation: `ALCHEMIST_HARNESS`, `ALCHEMIST_WORKSHOP`, `PYRGOS_DISPATCH_CMD` (the dispatcher), optionally `PYRGOS_CONVERSATION_MODEL` (haiku, sonnet, opus; default opus), `PYRGOS_DISPATCH_EXTRA_ARGS`, `VOICE_OVERSEER_SURFACE`. Without `PYRGOS_DISPATCH_CMD` an agreed item records a `launchError` and the brain says so.

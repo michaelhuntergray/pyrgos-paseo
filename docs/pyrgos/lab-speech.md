@@ -27,11 +27,11 @@ Config sets the defaults; a per-request override wins: `lab.synthesizeSpeech(tex
 
 Backend support today (lab `tts_server.py`, Kokoro):
 
-| Option    | Lab backend                                                                                                                        |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Option    | Lab backend                                                                                                                                                    |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `speed`   | **Supported** (voice-agent MIC-757). The server passes a finite `0 < speed <= 4` to Kokoro and uses 1.0 for anything else; 1.5 gave a clip about 1.5x shorter. |
-| `pitch`   | **Unsupported.** Kokoro has no pitch control. The field is sent and ignored; nothing is faked client-side.                         |
-| `emotion` | **Unsupported.** Kokoro has no emotion control. Sent and ignored, as above.                                                        |
+| `pitch`   | **Unsupported.** Kokoro has no pitch control. The field is sent and ignored; nothing is faked client-side.                                                     |
+| `emotion` | **Unsupported.** Kokoro has no emotion control. Sent and ignored, as above.                                                                                    |
 
 ## Word timestamps
 
@@ -48,6 +48,7 @@ Backend support today: **the lab STT server emits words on `final` messages** (v
 
 - TTS falls back when the connection fails, times out, errors, or closes before the first audio frame. A failure after audio has started destroys the stream (no mid-sentence switch).
 - STT falls back when `connect()` cannot reach the lab. Audio is resampled from 16 kHz to the fallback's required rate. A lab that drops mid-utterance is replayed to the fallback; with no fallback it surfaces as a session `error`.
+- STT keeps one ordered outbox of audio and commit frames until a final answers them, and replays it oldest first to whichever sink becomes ready (the fallback after a lab loss), each commit under the segment id already announced for it. The outbox is capped at 60 s of 16 kHz audio (`replayMaxBytes` on `LabSttOptions`): past it the oldest audio is dropped with a logged warning. Unanswered commits are capped by `maxPendingCommits`: a connected lab over the cap is treated as hung and dropped; otherwise the oldest announced commit gets an empty final. **Remaining limit:** an utterance whose audio was dropped replays as an empty commit, so it gets an empty fallback transcript.
 - Without a fallback (no stock provider configured), the lab error is thrown.
 
 ## PC local fallback (PC-CHECK: untested on Windows)
@@ -72,10 +73,13 @@ Unit tests use a fake lab server on a loopback ephemeral port:
 cd packages/server && npx vitest run src/server/speech/providers/lab
 ```
 
-Headless round trip against a real lab (speaks one sentence, transcribes it back, exits 0 on a match):
+Headless round trip against a real lab, exits 0 only when every check passes:
 
 ```
 PASEO_LAB_TTS_URL=... PASEO_LAB_STT_URL=... npx tsx scripts/pyrgos/lab-speech-roundtrip.mts
 ```
+
+1. Transcription: speaks one sentence, transcribes it back, compares.
+2. Demo flow (voice -> ledger -> delegation): speaks an action request and then "Yes." through the same TTS -> STT path and feeds the transcripts to the real ledger tools. It checks that the request becomes a draft item, that `agree_action` is refused before the read-back turn, that the spoken yes agrees it, that the real dispatch launcher builds the `worker` command (spawn is stubbed, so no agent starts), that the announce line is written, and that an overseer reply in the replies file is spoken by `ReplyPump`. All files go to a temp folder; nothing touches the real ledger or inbox.
 
 (`.mts` is exempt from the `.sh`/`.ps1` twin rule, like `.mjs`.)

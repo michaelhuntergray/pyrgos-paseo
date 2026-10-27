@@ -6,6 +6,8 @@ import {
   announceLine,
   createAnnouncer,
   createVoiceSession,
+  HOLD_SECONDS,
+  MAX_REPLY_ATTEMPTS,
   ReplyPump,
   ReplyWatcher,
   TurnGate,
@@ -220,7 +222,7 @@ describe("ReplyPump", () => {
     await appendFile(session.repliesPath, `${JSON.stringify({ text: "go ahead" })}\n`);
     const gate = new TurnGate();
     gate.set("bot", true);
-    const speak = vi.fn(async () => {});
+    const speak = vi.fn(async () => true);
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
       gate,
@@ -241,8 +243,8 @@ describe("ReplyPump", () => {
     let release: () => void = () => {};
     const speak = vi.fn(
       () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
+        new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
         }),
     );
     const pump = new ReplyPump({
@@ -265,9 +267,9 @@ describe("ReplyPump", () => {
     const session = createVoiceSession({ dir, session: "s6" });
     await appendFile(session.repliesPath, `${JSON.stringify({ text: "retry me" })}\n`);
     const speak = vi
-      .fn<(line: string) => Promise<void>>()
+      .fn<(line: string) => Promise<boolean>>()
       .mockRejectedValueOnce(new Error("tts down"))
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
     const pump = new ReplyPump({
       watcher: new ReplyWatcher(session.repliesPath),
       gate: new TurnGate(),
@@ -279,5 +281,77 @@ describe("ReplyPump", () => {
     expect(speak).toHaveBeenCalledTimes(2);
     const log = await readFile(session.path, "utf8");
     expect(log.split("\n").filter((line) => line.includes("retry me"))).toHaveLength(1);
+  });
+
+  it("re-speaks a reply interrupted before it was heard, at the next turn boundary", async () => {
+    const session = createVoiceSession({ dir, session: "s7" });
+    await appendFile(
+      session.repliesPath,
+      `${JSON.stringify({ text: "cut off" })}\n${JSON.stringify({ text: "after" })}\n`,
+    );
+    const speak = vi
+      .fn<(line: string) => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    let now = 0;
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(() => now),
+      session,
+      speak,
+    });
+    // Interrupted: nothing is acked, and the gate holds so the retry waits for the next boundary.
+    expect(await pump.pump()).toEqual([]);
+    expect(speak).toHaveBeenCalledTimes(1);
+    now += HOLD_SECONDS * 1000 - 1;
+    expect(await pump.pump()).toEqual([]);
+    expect(speak).toHaveBeenCalledTimes(1);
+    now += 1;
+    expect(await pump.pump()).toEqual(["cut off", "after"]);
+    expect(speak.mock.calls.map(([line]) => line)).toEqual([
+      "The overseer says: cut off",
+      "The overseer says: cut off",
+      "The overseer says: after",
+    ]);
+    const log = await readFile(session.path, "utf8");
+    expect(log.split("\n").filter((line) => line.includes("cut off"))).toHaveLength(1);
+  });
+
+  it("gives up on a reply after the retry window so one reply cannot block the queue", async () => {
+    const session = createVoiceSession({ dir, session: "s8" });
+    await appendFile(
+      session.repliesPath,
+      `${JSON.stringify({ text: "never heard" })}\n${JSON.stringify({ text: "next" })}\n`,
+    );
+    const speak = vi.fn(async (line: string) => !line.includes("never heard"));
+    let now = 0;
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(() => now),
+      session,
+      speak,
+    });
+    for (let attempt = 1; attempt <= MAX_REPLY_ATTEMPTS; attempt += 1) {
+      expect(await pump.pump()).toEqual([]);
+      now += HOLD_SECONDS * 1000;
+    }
+    // The last interruption drops the reply but still ends that drain, so "next" waits for its own boundary.
+    expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS);
+    expect(await pump.pump()).toEqual(["next"]);
+    expect(speak).toHaveBeenCalledTimes(MAX_REPLY_ATTEMPTS + 1);
+  });
+
+  it("does not ack a reply when speak resolves without reporting it was heard", async () => {
+    const session = createVoiceSession({ dir, session: "s9" });
+    await appendFile(session.repliesPath, `${JSON.stringify({ text: "unconfirmed" })}\n`);
+    // An untyped caller that awaits playback but drops the result must not count as heard.
+    const speak = vi.fn(async () => undefined) as unknown as (line: string) => Promise<boolean>;
+    const pump = new ReplyPump({
+      watcher: new ReplyWatcher(session.repliesPath),
+      gate: new TurnGate(() => 0),
+      session,
+      speak,
+    });
+    expect(await pump.pump()).toEqual([]);
   });
 });

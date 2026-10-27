@@ -38,6 +38,70 @@ function fakeChild() {
 }
 
 describe("dispatch launcher", () => {
+  it("starts a Windows dispatcher with a hidden console and a log handle", async () => {
+    const { root, env } = fixture();
+    const child = fakeChild();
+    const spawnFn = vi.fn(() => child) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({ env, platform: "win32", spawnFn, settleMs: 5, logDir: root })(
+      item(),
+    );
+    expect(spawnFn.mock.calls[0]?.[2]).toEqual({
+      detached: false,
+      windowsHide: true,
+      stdio: ["ignore", expect.any(Number), expect.any(Number)],
+    });
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("starts a Linux dispatcher detached with a log handle", async () => {
+    const { root, env } = fixture();
+    const child = fakeChild();
+    const spawnFn = vi.fn(() => child) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({ env, platform: "linux", spawnFn, settleMs: 5, logDir: root })(
+      item(),
+    );
+    expect(spawnFn.mock.calls[0]?.[2]).toEqual({
+      detached: true,
+      stdio: ["ignore", expect.any(Number), expect.any(Number)],
+    });
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("runs a PowerShell dispatcher with Windows flags and a fixed argv", async () => {
+    const { root, env } = fixture();
+    const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({
+      env: {
+        ...env,
+        PYRGOS_DISPATCH_CMD: "C:\\harness\\tools\\dispatch\\dispatch.PS1",
+        PYRGOS_DISPATCH_EXTRA_ARGS: "-DryRun -Test none",
+      },
+      spawnFn,
+      settleMs: 5,
+      logDir: root,
+    })(item());
+    expect(spawnFn).toHaveBeenCalledWith(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\harness\\tools\\dispatch\\dispatch.PS1",
+        "worker",
+        "Fix MIC-12 readme. Scope: README only. Done when: one line. item:abc",
+        "-Cwd",
+        join(root, "Professional", "demo"),
+        "-Ticket",
+        "MIC-12",
+        "-DryRun",
+        "-Test",
+        "none",
+      ],
+      expect.objectContaining({ stdio: ["ignore", expect.any(Number), expect.any(Number)] }),
+    );
+  });
+
   it("runs the dispatcher with a fixed argv, the project cwd and the ticket", async () => {
     const { root, env } = fixture();
     const child = fakeChild();
@@ -45,16 +109,39 @@ describe("dispatch launcher", () => {
     const launch = createDispatchLauncher({ env, spawnFn, settleMs: 5, logDir: root });
     await launch(item());
     const [file, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
-    expect(file).toBe("/bin/dispatch.sh");
-    expect(args.slice(0, 1)).toEqual(["worker"]);
-    expect(args[1]).toContain("item:abc");
-    expect(args.slice(2)).toEqual([
+    expect(file).toBe("bash");
+    expect(args.slice(0, 2)).toEqual(["/bin/dispatch.sh", "worker"]);
+    expect(args[2]).toContain("item:abc");
+    expect(args.slice(3)).toEqual([
       "--cwd",
       join(root, "Professional", "demo"),
       "--ticket",
       "MIC-12",
     ]);
     expect(child.unref).toHaveBeenCalled();
+  });
+
+  it("runs a plain executable with its original argv", async () => {
+    const { root, env } = fixture();
+    const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({
+      env: { ...env, PYRGOS_DISPATCH_CMD: "dispatch.exe" },
+      spawnFn,
+      settleMs: 5,
+      logDir: root,
+    })(item());
+    expect(spawnFn).toHaveBeenCalledWith(
+      "dispatch.exe",
+      [
+        "worker",
+        "Fix MIC-12 readme. Scope: README only. Done when: one line. item:abc",
+        "--cwd",
+        join(root, "Professional", "demo"),
+        "--ticket",
+        "MIC-12",
+      ],
+      expect.objectContaining({ stdio: ["ignore", expect.any(Number), expect.any(Number)] }),
+    );
   });
 
   it("rejects on a start error and on an early non-zero exit", async () => {
@@ -125,6 +212,32 @@ describe("resolveProjectDir: reviewer inputs", () => {
 });
 
 describe("dispatch launcher: extra args", () => {
+  it("drops PowerShell cwd and ticket flags from extras regardless of case", async () => {
+    const { root, env } = fixture();
+    const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
+    await createDispatchLauncher({
+      env: {
+        ...env,
+        PYRGOS_DISPATCH_CMD: "C:\\harness\\dispatch.ps1",
+        PYRGOS_DISPATCH_EXTRA_ARGS:
+          "-DryRun -cWd C:\\outside -TICKET MIC-99 -CWD=C:\\other -ticket=MIC-98 -Test none",
+      },
+      spawnFn,
+      settleMs: 5,
+      logDir: root,
+    })(item());
+    const [, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
+    expect(args.slice(7)).toEqual([
+      "-Cwd",
+      join(root, "Professional", "demo"),
+      "-Ticket",
+      "MIC-12",
+      "-DryRun",
+      "-Test",
+      "none",
+    ]);
+  });
+
   it("never lets PYRGOS_DISPATCH_EXTRA_ARGS override --cwd or --ticket", async () => {
     const { root, env } = fixture();
     const spawnFn = vi.fn(() => fakeChild()) as unknown as SpawnFn & ReturnType<typeof vi.fn>;
@@ -143,7 +256,7 @@ describe("dispatch launcher: extra args", () => {
     expect(args.join(" ")).not.toContain("/tmp/o2");
     expect(args).not.toContain("MIC-99");
     expect(args).toContain("--dry-run");
-    expect(args.slice(2, 6)).toEqual([
+    expect(args.slice(3, 7)).toEqual([
       "--cwd",
       join(root, "Professional", "demo"),
       "--ticket",
@@ -199,7 +312,7 @@ describe("dispatch launcher: fixed flags first", () => {
     });
     await launch(item());
     const [, args] = spawnFn.mock.calls[0] as unknown as [string, string[]];
-    expect(args.slice(2)).toEqual([
+    expect(args.slice(3)).toEqual([
       "--cwd",
       join(root, "Professional", "demo"),
       "--ticket",

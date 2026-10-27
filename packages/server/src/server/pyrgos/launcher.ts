@@ -1,22 +1,22 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { voiceFeedDir } from "./ledger/jsonl-store.js";
 import type { LedgerItem } from "./ledger/ledger.js";
 
-export type SpawnFn = (file: string, args: string[], logFd: number) => ChildProcess;
+export type SpawnFn = (file: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 export interface DispatchLauncherOptions {
   env?: NodeJS.ProcessEnv;
-  /** Seam for tests. Default spawns detached with output to the log file. */
+  /** Seam for tests. Default spawns with output to the log file. */
   spawnFn?: SpawnFn;
+  platform?: NodeJS.Platform;
   /** How long a non-zero exit still counts as a failed launch. */
   settleMs?: number;
   logDir?: string;
 }
 
-const defaultSpawn: SpawnFn = (file, args, logFd) =>
-  spawn(file, args, { detached: true, stdio: ["ignore", logFd, logFd] });
+const defaultSpawn: SpawnFn = (file, args, options) => spawn(file, args, options);
 
 /**
  * Folder of `project` under `<workshop>/<group>/`, or null. The name must be a single path
@@ -52,7 +52,7 @@ function safeDirs(dir: string): string[] {
 }
 
 /**
- * The `dispatch` route from DESIGN.md 4.4: run `$PYRGOS_DISPATCH_CMD worker <spec> --cwd <project>`
+ * The `dispatch` route from DESIGN.md 4.4: run `$PYRGOS_DISPATCH_CMD worker <spec>`
  * with a fixed argv (no shell). Rejects when the command is unset, the project cannot be found,
  * or the process fails to start or exits non-zero within `settleMs`. A longer run counts as launched.
  */
@@ -61,6 +61,7 @@ export function createDispatchLauncher(
 ): (item: LedgerItem) => Promise<void> {
   const env = options.env ?? process.env;
   const run = options.spawnFn ?? defaultSpawn;
+  const platform = options.platform ?? process.platform;
   const settleMs = options.settleMs ?? 2000;
 
   return async (item) => {
@@ -73,11 +74,18 @@ export function createDispatchLauncher(
 
     const spec = `${item.item}. Scope: ${item.scope}. Done when: ${item.doneCriteria}. item:${item.id}`;
     // Fixed extra flags for the dispatcher, e.g. "--dry-run --test none". Split on spaces, never a
-    // shell. The validated --cwd/--ticket come first so an extra flag that takes a value cannot
-    // swallow them; --cwd/--ticket in the extras are dropped along with their values.
-    const args = ["worker", spec, "--cwd", cwd];
+    // shell. The validated cwd/ticket come first so an extra flag that takes a value cannot
+    // swallow them; cwd/ticket in the extras are dropped along with their values.
+    const isPowerShell = /\.ps1$/i.test(command);
+    const isShellScript = /\.sh$/i.test(command);
+    let file = command;
+    if (isPowerShell) file = "powershell.exe";
+    else if (isShellScript) file = "bash";
+    const args = isPowerShell
+      ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", command, "worker", spec, "-Cwd", cwd]
+      : [...(isShellScript ? [command] : []), "worker", spec, "--cwd", cwd];
     const ticket = /\bMIC-\d+\b/.exec(`${item.item} ${item.scope ?? ""}`)?.[0];
-    if (ticket) args.push("--ticket", ticket);
+    if (ticket) args.push(isPowerShell ? "-Ticket" : "--ticket", ticket);
     args.push(...extraDispatchArgs(env.PYRGOS_DISPATCH_EXTRA_ARGS));
 
     const logDir = options.logDir ?? voiceFeedDir(env);
@@ -88,7 +96,11 @@ export function createDispatchLauncher(
     } catch {
       logFd = -1;
     }
-    const child = run(command, args, logFd);
+    const child = run(file, args, {
+      detached: platform !== "win32",
+      ...(platform === "win32" ? { windowsHide: true } : {}),
+      stdio: ["ignore", logFd, logFd],
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -112,7 +124,7 @@ export function createDispatchLauncher(
   };
 }
 
-const RESERVED_FLAGS = new Set(["--cwd", "--ticket"]);
+const RESERVED_FLAGS = new Set(["--cwd", "--ticket", "-cwd", "-ticket"]);
 
 function extraDispatchArgs(raw: string | undefined): string[] {
   const out: string[] = [];
@@ -120,7 +132,7 @@ function extraDispatchArgs(raw: string | undefined): string[] {
   for (let i = 0; i < tokens.length; i += 1) {
     if (tokens[i] === "--") continue; // an end-of-options marker would hide the validated --cwd
     const flag = tokens[i]!.split("=")[0]!;
-    if (RESERVED_FLAGS.has(flag)) {
+    if (RESERVED_FLAGS.has(flag.toLowerCase())) {
       if (!tokens[i]!.includes("=")) {
         const value = tokens[i + 1];
         if (value === undefined || value.startsWith("-")) {
