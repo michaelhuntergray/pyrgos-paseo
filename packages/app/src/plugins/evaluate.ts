@@ -2,6 +2,7 @@ import { requirePluginText } from "@getpaseo/plugin/client/host";
 import type { createPluginHosts } from "./hosts";
 import { openExternalUrl } from "@/utils/open-external-url";
 import * as pluginUiRuntime from "./react-native/ui";
+import { useRevealedText } from "@/hooks/use-revealed-text";
 import { useSettings } from "./settings/use-settings";
 import * as pluginSharedRuntime from "@getpaseo/plugin";
 import * as pluginClientRuntime from "@getpaseo/plugin/client";
@@ -36,6 +37,7 @@ import type {
   PluginScreenContribution,
   PluginSidebarItemContribution,
   PluginWorkspacePanelContribution,
+  PluginWorkspaceRowBadgeItemContribution,
 } from "./types";
 import type { ComponentType } from "react";
 import { parsePluginIcon, parseSerializablePluginIcon } from "./icons";
@@ -109,10 +111,16 @@ export type PluginClientRuntime = Pick<
   | "openSettings"
   | "openScreen"
   | "openSurface"
+  | "composers"
   | "openPanel"
+  | "subscribe"
   | "addComposerPill"
   | "addHeaderButton"
 > & { hosts: ReturnType<typeof createPluginHosts> };
+
+// COMPAT(pluginReactNativeEntrypoint): added in v0.13.0, remove after 2027-04-20
+// The 0.12 entry exposed the reveal hook as well as UI components.
+const pluginReactNativeCompatRuntime = { ...pluginUiRuntime, useRevealedText };
 
 export function runPluginClientBundle(
   id: string,
@@ -123,9 +131,13 @@ export function runPluginClientBundle(
   const collector: Omit<EvaluatedPlugin, "id" | "cleanup"> = {
     surfaces: [],
     settingsScreens: [],
+    sidebarViews: [],
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
+    workspaceRowBadgeItems: [],
     filePanels: [],
+    composerItems: [],
+    newWorkspaceItems: [],
     workspacePanels: [],
     commandCenterItems: [],
     clientSlashCommands: [],
@@ -135,12 +147,16 @@ export function runPluginClientBundle(
     timelineRenderers: [],
   };
   const surfaceIds = new Set<string>();
+  const sidebarViewIds = new Set<string>();
   const settingsScreenIds = new Set<string>();
   const sidebarItemIds: Record<PluginSidebarSection, Set<string>> = {
     header: new Set(),
     footer: new Set(),
   };
+  const workspaceRowItemIds = new Set<string>();
   const filePanelIds = new Set<string>();
+  const composerItemIds = new Set<string>();
+  const newWorkspaceItemIds = new Set<string>();
   const workspacePanelIds = new Set<string>();
   const commandCenterItemIds = new Set<string>();
   const clientSlashCommandNames = new Set<string>();
@@ -264,11 +280,68 @@ export function runPluginClientBundle(
         () => surfaceIds.delete(normalizedId),
       );
     },
+    addComposerItem(contribution) {
+      const normalizedId = requireId(contribution.id, "composer item id");
+      if (composerItemIds.has(normalizedId))
+        throw new Error(`Duplicate composer item: ${normalizedId}`);
+      if (!isComponentType(contribution.Component)) {
+        throw new Error(`Composer item ${normalizedId} is not a component`);
+      }
+      composerItemIds.add(normalizedId);
+      return register(
+        collector.composerItems,
+        { id: normalizedId, Component: contribution.Component },
+        () => composerItemIds.delete(normalizedId),
+      );
+    },
+    addNewWorkspaceItem(contribution) {
+      const normalizedId = requireId(contribution.id, "New workspace item id");
+      if (newWorkspaceItemIds.has(normalizedId))
+        throw new Error(`Duplicate New workspace item: ${normalizedId}`);
+      if (!isComponentType(contribution.Component)) {
+        throw new Error(`New workspace item ${normalizedId} is not a component`);
+      }
+      newWorkspaceItemIds.add(normalizedId);
+      return register(
+        collector.newWorkspaceItems,
+        { id: normalizedId, Component: contribution.Component },
+        () => newWorkspaceItemIds.delete(normalizedId),
+      );
+    },
+    addSidebarView(contribution) {
+      const normalizedId = requireId(contribution.id, "sidebar view id");
+      if (sidebarViewIds.has(normalizedId))
+        throw new Error(`Duplicate sidebar view: ${normalizedId}`);
+      if (!isComponentType(contribution.Component))
+        throw new Error(`Sidebar view ${normalizedId} is not a component`);
+      const title = requirePluginText(contribution.title);
+      sidebarViewIds.add(normalizedId);
+      return register(collector.sidebarViews, { ...contribution, id: normalizedId, title }, () =>
+        sidebarViewIds.delete(normalizedId),
+      );
+    },
     addSidebarHeaderItem(contribution: PluginSidebarItemContribution) {
       return addSidebarItem("header", contribution);
     },
     addSidebarFooterItem(contribution: PluginSidebarItemContribution) {
       return addSidebarItem("footer", contribution);
+    },
+    addWorkspaceRowBadgeItem(contribution: PluginWorkspaceRowBadgeItemContribution) {
+      const itemId = requireId(contribution.id, "workspace row badge item id");
+      if (workspaceRowItemIds.has(itemId))
+        throw new Error(`Duplicate workspace row badge item: ${itemId}`);
+      const title = normalizePluginText(contribution.title);
+      if (!title) throw new Error(`Workspace row badge item ${itemId} has no title`);
+      const icon = parsePluginIcon(`Workspace row badge item ${itemId}`, contribution.icon);
+      if (!isComponentType(contribution.Component)) {
+        throw new Error(`Workspace row badge item ${itemId} is not a component`);
+      }
+      workspaceRowItemIds.add(itemId);
+      return register(
+        collector.workspaceRowBadgeItems,
+        { id: itemId, title, icon, Component: contribution.Component },
+        () => workspaceRowItemIds.delete(itemId),
+      );
     },
     // COMPAT(pluginSidebarAliases): added in v0.11.0, remove after 2027-03-29
     // Titled by its id; a legacy item pointing at it lends the header its own title instead.
@@ -503,7 +576,7 @@ export function runPluginClientBundle(
   };
   const runtimeRequire = (name: string): unknown => {
     // COMPAT(pluginReactNativeEntrypoint): added in v0.13.0, remove after 2027-04-20
-    if (name === "@getpaseo/plugin/client/react-native") return pluginUiRuntime;
+    if (name === "@getpaseo/plugin/client/react-native") return pluginReactNativeCompatRuntime;
     if (name === "@getpaseo/plugin/client/ui") return pluginUiRuntime;
     if (name === "react") return React;
     if (name === "react/jsx-runtime") return ReactJsxRuntime;
@@ -512,7 +585,8 @@ export function runPluginClientBundle(
     if (name === "@getpaseo/plugin/client")
       return {
         ...pluginClientRuntime,
-        useSettings,
+        useSettings: (definition: import("@getpaseo/plugin").SettingsDefinition) =>
+          useSettings(definition, id),
         openExternalUrl,
         getPaseoClient: (serverId: string) => runtime.hosts.getPaseoClient(serverId),
         useHosts: () =>
@@ -577,9 +651,13 @@ export function runPluginClientBundle(
     cleanup,
     surfaces: collector.surfaces,
     settingsScreens: collector.settingsScreens,
+    sidebarViews: collector.sidebarViews,
     sidebarItems: collector.sidebarItems,
     legacySidebarItems: collector.legacySidebarItems,
+    workspaceRowBadgeItems: collector.workspaceRowBadgeItems,
     filePanels: collector.filePanels,
+    composerItems: collector.composerItems,
+    newWorkspaceItems: collector.newWorkspaceItems,
     workspacePanels: collector.workspacePanels as EvaluatedPlugin["workspacePanels"],
     commandCenterItems: collector.commandCenterItems,
     clientSlashCommands: collector.clientSlashCommands,
