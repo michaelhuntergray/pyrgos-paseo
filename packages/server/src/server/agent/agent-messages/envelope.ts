@@ -1,5 +1,5 @@
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
   AgentPromptContentBlock,
@@ -9,6 +9,10 @@ import type {
 
 const agentIdSchema = z.string().min(1);
 const sourceSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("change-request-update"),
+    url: z.url({ protocol: /^https?$/ }),
+  }),
   z.object({
     kind: z.literal("agent-message"),
     agentId: agentIdSchema,
@@ -68,6 +72,9 @@ function unescapeXml(value: string): string | null {
 
 export function formatAgentMessage(message: AgentMessage): string {
   const { source } = message;
+  if (source?.kind === "change-request-update") {
+    return `<paseo-system version="1" kind="change-request-update" source-url="${escapeXml(source.url)}" message-id="${escapeXml(message.id)}">\n${escapeXml(message.text)}\n</paseo-system>`;
+  }
   const attributes = source
     ? `kind="${source.kind}" source-agent-id="${escapeXml(source.agentId)}"`
     : 'kind="user-message"';
@@ -102,6 +109,7 @@ export function parseAgentMessage(text: string): AgentMessage | null {
     serverId: attributes.get("source-server-id"),
     event: attributes.get("event"),
     title: attributes.get("source-agent-title"),
+    url: attributes.get("source-url"),
   });
   if (!source.success) return null;
   return { id, source: source.data, text: body };
@@ -175,13 +183,31 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
   if (item.type !== "user_message") return item;
   const message = parseAgentMessage(item.text);
   if (!message) {
-    // COMPAT(legacySystemEnvelope): added in v0.11.1; remove after 2027-04-08 once
-    // legacy notification history is retired. Schedules still use this envelope.
-    return isSystemInjectedEnvelope(item.text) ? null : item;
+    if (!isSystemInjectedEnvelope(item.text)) return item;
+    // Schedule bodies include the run ID, keeping identity stable across replay.
+    const text = item.text.slice("<paseo-system>\n".length, -"\n</paseo-system>".length);
+    return {
+      type: "tool_call",
+      callId: `paseo-system:${createHash("sha256").update(item.text).digest("hex")}`,
+      name: "heartbeat",
+      status: "completed",
+      error: null,
+      detail: { type: "plain_text", text, icon: "sparkles" },
+    };
   }
   const { source } = message;
   if (!source) {
     return { ...item, text: message.text, clientMessageId: message.id };
+  }
+  if (source.kind === "change-request-update") {
+    return {
+      type: "tool_call",
+      callId: `paseo-change-request:${message.id}`,
+      name: "change_request_update",
+      status: "completed",
+      error: null,
+      detail: { type: "plain_text", text: message.text },
+    };
   }
   return {
     type: "tool_call",
