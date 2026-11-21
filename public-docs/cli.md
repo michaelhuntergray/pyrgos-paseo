@@ -44,6 +44,8 @@ Copy the full report ID from the list into `inspect` to see reset times, balance
 
 Queries use the host's five-minute cache when available. Add `--refresh` to bypass it. Use `--host` or `--home` to [select a daemon](#select-one-daemon). Hosts without usage-source support return an update message.
 
+For OpenRouter, set `OPENROUTER_API_KEY` in the daemon’s environment to show what the key spent today, this week, and this month in UTC. Set `OPENROUTER_MANAGEMENT_KEY` to show the remaining account credits. Each variable adds its own report to the host’s Usage panel and `paseo usage`.
+
 ### Usage in scripts
 
 ```bash
@@ -99,7 +101,7 @@ paseo provider diagnostic codex --json
 paseo --host devbox:6767 provider diagnostic opencode
 ```
 
-The diagnostic includes the configured command, daemon `PATH` and shell, matching binaries, resolved path, version, model count, and provider status. Use the global `--host` option for a remote daemon. This is the same diagnostic shown under **Settings → your host → Providers → provider → Diagnostic**.
+The diagnostic includes the configured command, daemon `PATH` and shell, matching binaries, resolved path, version, model count, and provider status. Use the global `--host` option for a remote daemon. This is the same diagnostic shown under **Settings → your host → Providers → provider → Diagnostic report**.
 
 ## Running agents
 
@@ -211,6 +213,8 @@ paseo workspace rename <workspace-id> --reset   # back to the branch or director
 paseo workspace archive <workspace-id>
 ```
 
+Inside an agent session, `PASEO_WORKSPACE_ID` holds the agent's own workspace ID, so an agent can run `paseo workspace rename "$PASEO_WORKSPACE_ID" "Auth rework"` or `paseo workspace archive "$PASEO_WORKSPACE_ID"` even when other workspaces share its directory.
+
 Add `--forge <name>` to PR checkout when Paseo cannot infer the forge from the source checkout. See [Git worktrees](/docs/worktrees) for setup hooks and services.
 
 ## Terminals
@@ -289,10 +293,10 @@ behavior.
 
 ```bash
 paseo ls                    # Non-archived agents in active workspaces
-paseo ls -a                 # Also include archived agents
+paseo ls -a                 # Also include archived and background agents, with a BACKGROUND column
 paseo ls -g                 # Non-archived agents across all workspaces
 paseo ls -a -g --json       # All agents, including archived, as JSON
-paseo ls --background       # Also include agents in background workspaces
+paseo ls --background       # Also include background agents and agents in background workspaces
 ```
 
 ## Streaming output

@@ -69,6 +69,7 @@ interface SidebarViewStoreState {
   setWorkspaceSort: (sort: WorkspaceSort) => void;
   toggleHostFilter: (serverId: string) => void;
   clearHostFilters: () => void;
+  focusHost: (serverId: string) => void;
   toggleProjectFilter: (viewKey: string) => void;
   clearProjectFilters: () => void;
   toggleLabelFilter: (name: string) => void;
@@ -91,7 +92,7 @@ const SidebarLabelFilterSchema = z.object({
   labels: z.array(z.string()),
 });
 const SidebarViewPersistedStateSchema = z.strictObject({
-  workspaceSort: z.enum(["created", "lastPrompt"]).optional(),
+  workspaceSort: z.enum(["manual", "created", "lastPrompt"]).optional(),
   showBackground: z.boolean().optional(),
   groupMode: PersistedSidebarGroupModeSchema.optional(),
   hostFilters: z.array(z.string()).optional(),
@@ -205,6 +206,9 @@ export const useSidebarViewStore = create<SidebarViewStoreState>()(
       toggleHostFilter: (serverId) =>
         set((state) => ({ hostFilters: toggleFilterEntry(state.hostFilters, serverId) })),
       clearHostFilters: () => set({ hostFilters: [] }),
+      // An explicit navigation target must not be hidden by another host's facets.
+      focusHost: (serverId) =>
+        set({ hostFilters: [serverId], projectFilters: [], labelFilter: emptyLabelFilter() }),
       toggleProjectFilter: (viewKey) =>
         set((state) => ({ projectFilters: toggleFilterEntry(state.projectFilters, viewKey) })),
       clearProjectFilters: () => set({ projectFilters: [] }),

@@ -14,7 +14,6 @@ import {
   selectWorkspaceDirectory,
   selectWorkspaceFields,
   selectWorkspaceKeys,
-  selectWorkspaceStatusesForBadges,
   selectWorkspaceStructureProjects,
   workspaceEqualityFns,
   type SidebarOrderSnapshot,
@@ -589,36 +588,6 @@ describe("selectHasWorkspaces", () => {
   });
 });
 
-describe("selectWorkspaceStatusesForBadges", () => {
-  it("tracks status changes without changing for no-ops or unrelated descriptor updates", () => {
-    const workspaceA = createWorkspace({ id: "workspace-a", status: "done" });
-    const workspaceB = createWorkspace({ id: "workspace-b", status: "attention" });
-    initializeWorkspaces([workspaceA, workspaceB]);
-
-    const tracked = trackSelector(
-      useSessionStore,
-      (state) => selectWorkspaceStatusesForBadges(state),
-      workspaceEqualityFns.deep,
-    );
-    const before = tracked.current;
-    expect(before).toEqual(["done", "attention"]);
-
-    useSessionStore
-      .getState()
-      .mergeWorkspaces(SERVER_ID, [{ ...workspaceA, scripts: [...workspaceA.scripts] }]);
-    expect(tracked.current).toBe(before);
-
-    useSessionStore.getState().mergeWorkspaces(SERVER_ID, [{ ...workspaceB, name: "Renamed" }]);
-    expect(tracked.current).toBe(before);
-
-    useSessionStore.getState().mergeWorkspaces(SERVER_ID, [{ ...workspaceA, status: "failed" }]);
-    expect(tracked.current).not.toBe(before);
-    expect(tracked.current).toEqual(["failed", "attention"]);
-
-    tracked.stop();
-  });
-});
-
 it("a prompt changes only its project's structure and output preserves both project identities", () => {
   const a = { ...createWorkspace({ id: "a", projectId: "p" }), createdAt: new Date("2026-01-01") };
   const b = { ...createWorkspace({ id: "b", projectId: "p" }), createdAt: new Date("2026-02-01") };
@@ -639,4 +608,28 @@ it("a prompt changes only its project's structure and output preserves both proj
   const output = select(state([{ ...prompted, status: "running" }, b, c]));
   expect(output[0]).toBe(after[0]);
   expect(output[1]).toBe(after[1]);
+});
+
+it("applies manual order only when requested without mutating the automatic baseline", () => {
+  const project = {
+    viewKey: "p",
+    projectKey: "p",
+    projectName: "P",
+    projectKind: "git" as const,
+    iconWorkingDir: "/repo",
+    hosts: [],
+    workspaceKeys: ["h:new", "h:b", "h:a"],
+  };
+  const input = { projects: [project], projectOrder: ["p"] };
+  expect(
+    composeWorkspaceStructure({
+      ...input,
+      workspaceOrderByProject: { p: ["h:filtered", "h:a", "h:b"] },
+    }).projects[0].workspaceKeys,
+  ).toEqual(["h:new", "h:a", "h:b"]);
+  expect(composeWorkspaceStructure(input).projects[0].workspaceKeys).toEqual([
+    "h:new",
+    "h:b",
+    "h:a",
+  ]);
 });

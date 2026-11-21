@@ -5,11 +5,9 @@ import {
   type WorkspaceStructure,
   type WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
-import type { DesktopBadgeWorkspaceStatus } from "@/utils/desktop-badge-state";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import type { ProjectDescriptor, WorkspaceDescriptor } from "../session-store";
 
-export type { DesktopBadgeWorkspaceStatus } from "@/utils/desktop-badge-state";
 export type { WorkspaceStructure, WorkspaceStructureProject } from "@/projects/workspace-structure";
 
 export interface SessionsSnapshot {
@@ -254,6 +252,7 @@ export function selectProjectOrder(state: SidebarOrderSnapshot): string[] {
 export function composeWorkspaceStructure(input: {
   projects: WorkspaceStructureProject[];
   projectOrder: readonly string[];
+  workspaceOrderByProject?: Readonly<Record<string, string[]>>;
 }): WorkspaceStructure {
   if (input.projects.length === 0) {
     return EMPTY_WORKSPACE_STRUCTURE;
@@ -265,7 +264,21 @@ export function composeWorkspaceStructure(input: {
     getKey: (project) => project.viewKey,
   });
 
-  return { projects: orderedProjects };
+  return {
+    // Keep the shared automatic projection immutable when applying a sidebar preference.
+    // eslint-disable-next-line oxc/no-map-spread
+    projects: orderedProjects.map((project) => {
+      const storedOrder = input.workspaceOrderByProject?.[project.viewKey];
+      if (!storedOrder) return project;
+      const orderedProject = { ...project };
+      orderedProject.workspaceKeys = applyStoredOrdering({
+        items: project.workspaceKeys,
+        storedOrder,
+        getKey: (key) => key,
+      });
+      return orderedProject;
+    }),
+  };
 }
 
 export function selectWorkspaceKeys(state: SessionsSnapshot, serverId: string | null): string[] {
@@ -292,21 +305,17 @@ export function selectRecommendedProjectPaths(
     .filter((path) => path.length > 0);
 }
 
+export function selectProjectRootPaths(state: SessionsSnapshot, serverId: string | null): string[] {
+  const projects = serverId ? state.sessions[serverId]?.projects : undefined;
+  if (!projects || projects.size === 0) {
+    return EMPTY_WORKSPACE_KEYS;
+  }
+  return Array.from(projects.values(), (project) => project.projectRootPath);
+}
+
 export function selectHasWorkspaces(state: SessionsSnapshot, serverId: string | null): boolean {
   if (!serverId) {
     return false;
   }
   return (state.sessions[serverId]?.workspaces?.size ?? 0) > 0;
-}
-
-export function selectWorkspaceStatusesForBadges(
-  state: SessionsSnapshot,
-): DesktopBadgeWorkspaceStatus[] {
-  const statuses: DesktopBadgeWorkspaceStatus[] = [];
-  for (const session of Object.values(state.sessions)) {
-    for (const workspace of session.workspaces.values()) {
-      statuses.push(workspace.status);
-    }
-  }
-  return statuses;
 }
