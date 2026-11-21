@@ -1,0 +1,13 @@
+# T-808: upstream getpaseo test fixtures use 100.x addresses (tailnet-ip rule false positives)
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:15
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:16
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:17
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:18
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:19
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:34
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:35
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:36
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:37
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:48
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:65
+packages/app/src/components/direct-connection-host.test.ts:tailnet-ip:66
